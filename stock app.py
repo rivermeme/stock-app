@@ -11,6 +11,10 @@ from content import ISSUES
 from domain import KST, Portfolio, discussion_top, morning_cutoff
 
 
+# ==================================================
+# 기본 설정
+# ==================================================
+
 st.set_page_config(
     page_title="강삐 · 강민 주식비서",
     page_icon="☀️",
@@ -115,6 +119,7 @@ st.markdown(
         font-size: 12px;
     }
 
+    /* 휴대폰에서도 가로 배치 유지 */
     [data-testid="stHorizontalBlock"] {
         flex-wrap: nowrap !important;
     }
@@ -124,36 +129,50 @@ st.markdown(
         width: auto !important;
     }
 
+    /* 날짜 아래에 배치되는 메뉴 */
     .st-key-navigation {
-        position: fixed;
-        bottom: 0;
-        left: 50%;
-        transform: translateX(-50%);
-        width: min(540px, 100%);
-        padding: 10px 14px max(
-            10px,
-            env(safe-area-inset-bottom)
-        );
-        background: rgba(255, 255, 255, .98);
-        border-top: 1px solid #e6e8ef;
-        z-index: 999;
-    }
-
-    .st-key-navigation button {
-        border: 0;
-        background: transparent;
-        padding: 4px !important;
-    }
-
-    .st-key-navigation button[kind="primary"] {
-        color: #505bd1;
-        background: #eef0ff;
+        position: static;
+        width: 100%;
+        padding: 4px;
+        background: #f6f7fb;
+        border: 1px solid #e3e6ef;
+        border-radius: 12px;
     }
 
     .st-key-navigation [data-testid="stHorizontalBlock"] {
         gap: 4px !important;
     }
 
+    .st-key-navigation button {
+        min-height: 46px !important;
+        background: transparent !important;
+        border: 0 !important;
+        border-radius: 8px;
+        padding: 4px !important;
+        color: #263249 !important;
+    }
+
+    .st-key-navigation button p {
+        color: #263249 !important;
+        font-weight: 600;
+        white-space: nowrap;
+    }
+
+    .st-key-navigation button[kind="primary"] {
+        background: #505bd1 !important;
+        color: #ffffff !important;
+    }
+
+    .st-key-navigation button[kind="primary"] p {
+        color: #ffffff !important;
+    }
+
+    .st-key-navigation button:focus-visible {
+        outline: 2px solid #505bd1 !important;
+        outline-offset: 2px;
+    }
+
+    /* 국내 / 해외 / 비트코인, 간편 / 상세 */
     [data-testid="stRadio"],
     [data-testid="stRadio"] > div {
         width: 100% !important;
@@ -174,17 +193,23 @@ st.markdown(
         margin: 0 !important;
         padding: 8px 4px;
         border-radius: 7px;
+        color: #263249 !important;
+    }
+
+    [data-testid="stRadio"]
+    label[data-baseweb="radio"] p {
+        color: #263249 !important;
     }
 
     [data-testid="stRadio"]
     label[data-baseweb="radio"]:has(input:checked) {
         background: #505bd1;
-        color: white;
+        color: #ffffff !important;
     }
 
     [data-testid="stRadio"]
     label[data-baseweb="radio"]:has(input:checked) p {
-        color: white !important;
+        color: #ffffff !important;
     }
 
     [data-testid="stRadio"]
@@ -192,10 +217,22 @@ st.markdown(
         display: none;
     }
 
+    [data-testid="stRadio"]
+    label[data-baseweb="radio"]:focus-within {
+        outline: 2px solid #505bd1;
+        outline-offset: 2px;
+    }
+
+    /* AI 의견 상자 */
     .st-key-ai_note {
         background: #edf0ff;
         border-radius: 12px;
         padding: 15px;
+        color: #263249 !important;
+    }
+
+    .st-key-ai_note p {
+        color: #263249 !important;
     }
 
     @media (max-width: 600px) {
@@ -212,6 +249,10 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
+# ==================================================
+# 저장소와 화면 상태
+# ==================================================
 
 portfolio = Portfolio(
     os.getenv("PORTFOLIO_DB", "data/portfolio.db")
@@ -231,7 +272,7 @@ def edit(asset=None):
     st.session_state.edit_asset = asset or {}
     st.session_state.show_form = True
 
-    # 새 자산과 기존 자산의 입력값이 섞이지 않게 합니다.
+    # 편집 대상을 바꾸면 입력 폼도 새로 만듭니다.
     st.session_state.form_revision = (
         st.session_state.get("form_revision", 0) + 1
     )
@@ -245,35 +286,9 @@ def badge(text, color=""):
     )
 
 
-# --------------------------------------------------
-# 하단 고정 메뉴
-# --------------------------------------------------
-
-with st.container(key="navigation"):
-    columns = st.columns(4)
-    labels = ["오늘", "분석", "인기글", "내 자산"]
-    icons = ["⌂", "⌕", "▤", "♙"]
-
-    for column, label, icon in zip(
-        columns,
-        labels,
-        icons,
-    ):
-        active = st.session_state.page == label
-
-        column.button(
-            f"{icon} {label}",
-            key="nav_" + label,
-            type="primary" if active else "secondary",
-            use_container_width=True,
-            on_click=go,
-            args=(label,),
-        )
-
-
-# --------------------------------------------------
-# 공통 상단
-# --------------------------------------------------
+# ==================================================
+# 상단 이름과 날짜
+# ==================================================
 
 st.markdown(
     '<div class="brand">강민 주식비서</div>',
@@ -308,9 +323,35 @@ with sample_column:
     badge("샘플 데이터")
 
 
-# --------------------------------------------------
+# ==================================================
+# 날짜 아래 메뉴
+# ==================================================
+
+with st.container(key="navigation"):
+    columns = st.columns(4)
+    labels = ["오늘", "분석", "인기글", "내 자산"]
+    icons = ["⌂", "⌕", "▤", "♙"]
+
+    for column, label, icon in zip(
+        columns,
+        labels,
+        icons,
+    ):
+        active = st.session_state.page == label
+
+        column.button(
+            f"{icon} {label}",
+            key="nav_" + label,
+            type="primary" if active else "secondary",
+            use_container_width=True,
+            on_click=go,
+            args=(label,),
+        )
+
+
+# ==================================================
 # 오늘
-# --------------------------------------------------
+# ==================================================
 
 if page == "오늘":
     st.header("오늘 알아둘 이야기")
@@ -334,7 +375,6 @@ if page == "오늘":
             color = ["", "purple", "teal"][index % 3]
 
             badge(item["category"], color)
-
             st.subheader(item["title"])
             st.write(item["summary"])
 
@@ -368,6 +408,7 @@ if page == "오늘":
         text_column, action_column = st.columns([2, 1])
 
         text_column.write("**내 자산 관련 소식**")
+
         text_column.caption(
             f"보유자산 {len(portfolio.all())}개 · "
             "실제 연결 분석은 준비 중입니다."
@@ -380,14 +421,14 @@ if page == "오늘":
             use_container_width=True,
         )
 
-    # 앱 화면과 별개인 공유용 이미지입니다.
-    # 시장 탭과 관계없이 국내·해외 두 장을 제공합니다.
+    # 국내 1장 / 해외 1장 별도 생성
     with st.expander(
         "카카오톡용 카드뉴스 · 국내 / 해외"
     ):
         st.caption(
             "국내 1장, 해외 1장을 각각 생성합니다. "
-            "모두 가상 예시이며 자동 발송은 미연결입니다."
+            "현재 내용은 가상 예시이며 "
+            "카카오톡 자동 발송은 미연결입니다."
         )
 
         card_columns = st.columns(2)
@@ -418,9 +459,9 @@ if page == "오늘":
                 column.warning(str(error))
 
 
-# --------------------------------------------------
-# 상세 분석
-# --------------------------------------------------
+# ==================================================
+# 분석
+# ==================================================
 
 elif page == "분석":
     st.button(
@@ -491,10 +532,12 @@ elif page == "분석":
 
     with st.container(key="ai_note"):
         st.markdown("**✦ AI 의견 · 예시**")
+
         st.write(
             "계획 발표만으로 판단하기보다는 "
             "실제 수주와 실적을 확인할 필요가 있습니다."
         )
+
         st.caption(
             "AI API 미연결 · 미리 작성한 예시입니다."
         )
@@ -514,9 +557,9 @@ elif page == "분석":
         )
 
 
-# --------------------------------------------------
+# ==================================================
 # 내 자산
-# --------------------------------------------------
+# ==================================================
 
 elif page == "내 자산":
     st.header("내 자산")
@@ -615,6 +658,7 @@ elif page == "내 자산":
                         "delete_id",
                         None,
                     )
+
                     st.rerun()
 
     if st.session_state.get("show_form"):
@@ -734,9 +778,9 @@ elif page == "내 자산":
     )
 
 
-# --------------------------------------------------
+# ==================================================
 # 인기글
-# --------------------------------------------------
+# ==================================================
 
 elif page == "인기글":
     st.header("사람들이 많이 본 이야기")
@@ -789,10 +833,12 @@ elif page == "인기글":
         ).isoformat(),
     })
 
-    for rank, post in enumerate(
-        discussion_top(posts, cutoff),
-        1,
-    ):
+    ranked_posts = discussion_top(
+        posts,
+        cutoff,
+    )
+
+    for rank, post in enumerate(ranked_posts, 1):
         with st.container(border=True):
             st.write(
                 f'**{rank:02d}　{post["title"]}**'
@@ -804,9 +850,9 @@ elif page == "인기글":
             )
 
 
-# --------------------------------------------------
+# ==================================================
 # 설정 / 자료 연결
-# --------------------------------------------------
+# ==================================================
 
 else:
     st.header("설정 · 자료 연결")
