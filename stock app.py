@@ -12,7 +12,7 @@ from domain import KST, Portfolio, discussion_top, morning_cutoff
 
 
 st.set_page_config(
-    page_title="모닝브리프",
+    page_title="강삐 · 강민 주식비서",
     page_icon="☀️",
     layout="centered",
 )
@@ -21,82 +21,190 @@ st.markdown(
     """
     <style>
     .block-container {
-        max-width: 740px;
-        padding-top: 2rem;
-        padding-bottom: 5rem;
+        max-width: 540px;
+        padding: 1.5rem 1rem 7rem;
+    }
+
+    header[data-testid="stHeader"] {
+        background: transparent;
+        pointer-events: none;
+    }
+
+    header[data-testid="stHeader"] button {
+        pointer-events: auto;
+    }
+
+    [data-testid="stToolbar"] {
+        display: none;
     }
 
     h1 {
-        font-size: 1.85rem !important;
-        letter-spacing: -1.2px;
+        font-size: 1.9rem !important;
+        letter-spacing: -1px;
+        padding: .1rem 0 .6rem !important;
     }
 
     h2 {
-        font-size: 1.4rem !important;
+        font-size: 1.45rem !important;
+        letter-spacing: -.6px;
     }
 
     h3 {
-        font-size: 1.1rem !important;
+        font-size: 1.08rem !important;
     }
 
-    .eyebrow {
-        color: #008783;
-        font-weight: 700;
-        font-size: .86rem;
+    p {
+        line-height: 1.6;
     }
 
-    .issue {
-        border: 1px solid #e1e5ee;
-        border-radius: 14px;
-        padding: 20px;
-        margin: 12px 0;
-        background: #fff;
+    .brand {
+        font-size: 13px;
+        color: #777f92;
+        margin-bottom: 2px;
     }
 
-    .issue h3 {
-        margin: 8px 0;
+    .badge {
+        display: inline-block;
+        border-radius: 8px;
+        padding: 4px 10px;
+        background: #eaf0ff;
+        color: #425bd0;
+        font-size: 12px;
+        font-weight: 600;
     }
 
-    .issue p {
-        color: #596173;
-        line-height: 1.7;
-        margin: 5px 0;
+    .purple {
+        background: #f0eaff;
+        color: #8d51c9;
+    }
+
+    .teal {
+        background: #e3f2ef;
+        color: #148579;
     }
 
     .tag {
         display: inline-block;
-        background: #eef0ff;
-        border-radius: 7px;
-        padding: 5px 10px;
-        margin-right: 4px;
-        font-size: .8rem;
-        color: #4252bb;
-    }
-
-    .sample {
-        display: inline-block;
-        color: #485aca;
-        background: #eef1ff;
-        padding: 6px 10px;
+        padding: 4px 12px;
         border-radius: 8px;
-        font-size: .8rem;
+        background: #eef0ff;
+        color: #303c77;
+        font-size: 13px;
+        margin: 10px 5px 0 0;
     }
 
-    div[data-testid="stMetricValue"] {
-        font-size: 1.35rem;
+    [data-testid="stVerticalBlockBorderWrapper"] {
+        border-radius: 12px !important;
     }
 
     button {
-        min-height: 44px;
+        min-height: 42px !important;
+    }
+
+    button[kind="primary"],
+    button[kind="primaryFormSubmit"] {
+        background: #505bd1;
+        border-color: #505bd1;
+    }
+
+    div[data-testid="stMetricValue"] {
+        font-size: 1.15rem;
+    }
+
+    div[data-testid="stMetricLabel"] {
+        font-size: 12px;
+    }
+
+    [data-testid="stHorizontalBlock"] {
+        flex-wrap: nowrap !important;
+    }
+
+    [data-testid="stColumn"] {
+        min-width: 0 !important;
+        width: auto !important;
+    }
+
+    .st-key-navigation {
+        position: fixed;
+        bottom: 0;
+        left: 50%;
+        transform: translateX(-50%);
+        width: min(540px, 100%);
+        padding: 10px 14px max(
+            10px,
+            env(safe-area-inset-bottom)
+        );
+        background: rgba(255, 255, 255, .98);
+        border-top: 1px solid #e6e8ef;
+        z-index: 999;
+    }
+
+    .st-key-navigation button {
+        border: 0;
+        background: transparent;
+        padding: 4px !important;
+    }
+
+    .st-key-navigation button[kind="primary"] {
+        color: #505bd1;
+        background: #eef0ff;
+    }
+
+    .st-key-navigation [data-testid="stHorizontalBlock"] {
+        gap: 4px !important;
+    }
+
+    [data-testid="stRadio"],
+    [data-testid="stRadio"] > div {
+        width: 100% !important;
+    }
+
+    [data-testid="stRadio"] > div[role="radiogroup"] {
+        background: #f6f7fb;
+        border: 1px solid #e3e6ef;
+        border-radius: 10px;
+        padding: 3px;
+        display: flex;
+        gap: 0 !important;
+    }
+
+    [data-testid="stRadio"] label[data-baseweb="radio"] {
+        flex: 1;
+        justify-content: center;
+        margin: 0 !important;
+        padding: 8px 4px;
+        border-radius: 7px;
+    }
+
+    [data-testid="stRadio"]
+    label[data-baseweb="radio"]:has(input:checked) {
+        background: #505bd1;
+        color: white;
+    }
+
+    [data-testid="stRadio"]
+    label[data-baseweb="radio"]:has(input:checked) p {
+        color: white !important;
+    }
+
+    [data-testid="stRadio"]
+    label[data-baseweb="radio"] > div:first-child {
+        display: none;
+    }
+
+    .st-key-ai_note {
+        background: #edf0ff;
+        border-radius: 12px;
+        padding: 15px;
     }
 
     @media (max-width: 600px) {
         .block-container {
-            padding: 1.2rem 1rem 4rem;
+            padding-top: 1rem;
         }
 
         h1 {
-            font-size: 1.65rem !important;
+            font-size: 1.7rem !important;
         }
     }
     </style>
@@ -104,233 +212,306 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
 portfolio = Portfolio(
     os.getenv("PORTFOLIO_DB", "data/portfolio.db")
 )
 
-if "page" not in st.session_state:
-    st.session_state.page = "오늘"
-
-if "next_page" in st.session_state:
-    st.session_state.page = st.session_state.pop("next_page")
+st.session_state.setdefault("page", "오늘")
 
 
-def navigate(page):
-    st.session_state.next_page = page
+def go(page, index=None):
+    st.session_state.page = page
+
+    if index is not None:
+        st.session_state.selected = index
 
 
-def open_asset_form(asset=None):
+def edit(asset=None):
     st.session_state.edit_asset = asset or {}
     st.session_state.show_form = True
 
+    # 새 자산과 기존 자산의 입력값이 섞이지 않게 합니다.
+    st.session_state.form_revision = (
+        st.session_state.get("form_revision", 0) + 1
+    )
+
+
+def badge(text, color=""):
+    st.markdown(
+        f'<span class="badge {color}">'
+        f"{html.escape(text)}</span>",
+        unsafe_allow_html=True,
+    )
+
+
+# --------------------------------------------------
+# 하단 고정 메뉴
+# --------------------------------------------------
+
+with st.container(key="navigation"):
+    columns = st.columns(4)
+    labels = ["오늘", "분석", "인기글", "내 자산"]
+    icons = ["⌂", "⌕", "▤", "♙"]
+
+    for column, label, icon in zip(
+        columns,
+        labels,
+        icons,
+    ):
+        active = st.session_state.page == label
+
+        column.button(
+            f"{icon} {label}",
+            key="nav_" + label,
+            type="primary" if active else "secondary",
+            use_container_width=True,
+            on_click=go,
+            args=(label,),
+        )
+
+
+# --------------------------------------------------
+# 공통 상단
+# --------------------------------------------------
 
 st.markdown(
-    '<span class="eyebrow">아침을 여는 투자 이야기</span>',
+    '<div class="brand">강민 주식비서</div>',
     unsafe_allow_html=True,
 )
 
-left, right = st.columns([3, 1])
+heading, settings = st.columns([6, 1])
 
-left.title("모닝브리프")
-right.markdown(
-    '<span class="sample">샘플 데이터</span>',
-    unsafe_allow_html=True,
+heading.title("강삐")
+
+settings.button(
+    "⚙",
+    key="settings",
+    help="자료 연결 및 설정",
+    on_click=go,
+    args=("설정",),
 )
 
+page = st.session_state.page
 now = datetime.now(KST)
 
-st.caption(
-    now.strftime("%Y년 %m월 %d일")
-    + " · 매일 아침 7시 KST"
+weekdays = ["월", "화", "수", "목", "금", "토", "일"]
+
+date_column, sample_column = st.columns([3, 1])
+
+date_column.caption(
+    f"{now.month}월 {now.day}일 "
+    f"{weekdays[now.weekday()]}요일 · KST"
 )
 
-page = st.radio(
-    "메뉴",
-    ["오늘", "분석", "인기글", "내 자산", "자료 연결"],
-    horizontal=True,
-    label_visibility="collapsed",
-    key="page",
-)
-
-st.divider()
+with sample_column:
+    badge("샘플 데이터")
 
 
 # --------------------------------------------------
-# 오늘 / 분석
+# 오늘
 # --------------------------------------------------
 
-if page in ("오늘", "분석"):
+if page == "오늘":
+    st.header("오늘 알아둘 이야기")
+
     market = st.radio(
         "시장",
         list(ISSUES),
         horizontal=True,
+        width="stretch",
+        label_visibility="collapsed",
         key="market",
-    ) or "국내"
+    )
 
-    items = ISSUES[market]
+    st.caption(
+        "최근 7일 리서치 · 핵심 이슈 "
+        + str(len(ISSUES[market]))
+    )
 
-    if page == "오늘":
-        st.header("오늘 알아둘 이야기")
+    for index, item in enumerate(ISSUES[market]):
+        with st.container(border=True):
+            color = ["", "purple", "teal"][index % 3]
 
-        st.caption(
-            "최근 7일 리서치를 위한 화면 · "
-            "현재는 가상 예시입니다"
-        )
+            badge(item["category"], color)
 
-        for index, item in enumerate(items):
-            names = " ".join(
-                f'<span class="tag">{html.escape(name)}</span>'
+            st.subheader(item["title"])
+            st.write(item["summary"])
+
+            if index == 0:
+                st.write(item["impact"])
+
+            names_column, action_column = st.columns(
+                [2, 1]
+            )
+
+            names_html = " ".join(
+                f'<span class="tag">'
+                f"{html.escape(name)}</span>"
                 for name in item["names"]
             )
 
-            category = html.escape(item["category"])
-            title = html.escape(item["title"])
-            summary = html.escape(item["summary"])
-            impact = html.escape(item["impact"])
-
-            st.markdown(
-                f"""
-                <div class="issue">
-                    <span class="eyebrow">{category}</span>
-                    <h3>{title}</h3>
-                    <p>
-                        {summary}<br>
-                        {impact}
-                    </p>
-                    <br>
-                    {names}
-                </div>
-                """,
+            names_column.markdown(
+                names_html,
                 unsafe_allow_html=True,
             )
 
-            if st.button(
-                "분석 보기 →",
-                key=f"open-{market}-{index}",
+            action_column.button(
+                "분석 보기 ›",
+                key=f"issue_{market}_{index}",
                 use_container_width=True,
-            ):
-                st.session_state.selected = index
-                navigate("분석")
-                st.rerun()
-
-        with st.container(border=True):
-            st.subheader("내 자산과 연결해 보세요")
-
-            st.write(
-                f"등록된 자산 {len(portfolio.all())}개 · "
-                "실제 연결 분석은 아직 제공하지 않습니다."
+                on_click=go,
+                args=("분석", index),
             )
 
-            st.button(
-                "자산 등록",
-                on_click=navigate,
-                args=("내 자산",),
-            )
+    with st.container(border=True):
+        text_column, action_column = st.columns([2, 1])
 
-        if market != "비트코인":
+        text_column.write("**내 자산 관련 소식**")
+        text_column.caption(
+            f"보유자산 {len(portfolio.all())}개 · "
+            "실제 연결 분석은 준비 중입니다."
+        )
+
+        action_column.button(
+            "자산 등록",
+            on_click=go,
+            args=("내 자산",),
+            use_container_width=True,
+        )
+
+    # 앱 화면과 별개인 공유용 이미지입니다.
+    # 시장 탭과 관계없이 국내·해외 두 장을 제공합니다.
+    with st.expander(
+        "카카오톡용 카드뉴스 · 국내 / 해외"
+    ):
+        st.caption(
+            "국내 1장, 해외 1장을 각각 생성합니다. "
+            "모두 가상 예시이며 자동 발송은 미연결입니다."
+        )
+
+        card_columns = st.columns(2)
+
+        for target, column in zip(
+            ["국내", "해외"],
+            card_columns,
+        ):
             try:
-                card_image = render_card(
-                    market,
-                    items,
+                card_data = render_card(
+                    target,
+                    ISSUES[target],
                     os.getenv("CARD_FONT_PATH"),
                 )
 
-                st.download_button(
-                    "카카오톡용 카드뉴스 PNG 다운로드",
-                    data=card_image,
-                    file_name=f"morning-{market}-sample.png",
+                column.download_button(
+                    f"{target} 카드 PNG",
+                    data=card_data,
+                    file_name=(
+                        f"gangppi-{target}-sample.png"
+                    ),
                     mime="image/png",
+                    key="card_" + target,
                     use_container_width=True,
                 )
 
             except (ValueError, OSError) as error:
-                st.info(str(error))
+                column.warning(str(error))
 
-        st.caption(
-            "이미지 저장 기능입니다. "
-            "카카오톡 자동 발송은 연결되지 않았습니다."
-        )
 
-    else:
-        selected = st.selectbox(
-            "이슈 선택",
-            options=range(len(items)),
-            index=min(
-                st.session_state.get("selected", 0),
-                len(items) - 1,
-            ),
-            format_func=lambda index: items[index]["title"],
-        )
+# --------------------------------------------------
+# 상세 분석
+# --------------------------------------------------
 
-        item = items[selected]
+elif page == "분석":
+    st.button(
+        "‹ 오늘로",
+        on_click=go,
+        args=("오늘",),
+    )
 
-        st.markdown(
-            (
-                '<span class="eyebrow">'
-                + html.escape(item["category"])
-                + "</span>"
-            ),
-            unsafe_allow_html=True,
-        )
+    market = st.session_state.get("market", "국내")
+    items = ISSUES[market]
 
-        st.header(item["title"])
+    index = min(
+        st.session_state.get("selected", 0),
+        len(items) - 1,
+    )
 
-        mode = st.radio(
-            "읽기 방식",
-            ["간편", "상세"],
-            index=1,
-            horizontal=True,
-        )
+    selected = st.selectbox(
+        "이슈 선택",
+        range(len(items)),
+        index=index,
+        format_func=lambda i: items[i]["title"],
+    )
 
+    item = items[selected]
+
+    badge(item["category"])
+    st.header(item["title"])
+
+    mode = st.radio(
+        "읽기 방식",
+        ["간편", "상세"],
+        index=1,
+        horizontal=True,
+        width="stretch",
+        label_visibility="collapsed",
+    )
+
+    with st.container(border=True):
+        st.subheader("핵심 요약")
+        st.write(item["summary"])
+        st.write(item["impact"])
+
+    if mode == "상세":
         with st.container(border=True):
-            st.subheader("핵심 요약")
-            st.write(item["summary"])
-            st.write(item["impact"])
+            st.subheader("보고서에서 확인할 내용")
 
-        if mode == "상세":
-            with st.container(border=True):
-                st.subheader("보고서에서 확인할 내용")
+            checks = [
+                "투자 규모와 집행 일정",
+                "기업의 실제 공급 관계",
+                "실적에 반영되는 시점",
+            ]
+
+            for number, text in enumerate(checks, 1):
+                st.write(f"**{number}**　{text}")
+
+        with st.expander(
+            "관련 종목 · ETF",
+            expanded=True,
+        ):
+            for name in item["names"]:
                 st.write(
-                    "1. 투자 규모와 집행 일정\n\n"
-                    "2. 기업의 실제 공급 관계\n\n"
-                    "3. 실적에 반영되는 시점"
+                    f"**{name}**　"
+                    "가상 자산 · 연결 관계 설명용"
                 )
 
-            with st.expander(
-                "관련 종목 · ETF",
-                expanded=True,
-            ):
-                for name in item["names"]:
-                    st.write(
-                        f"**{name}** — "
-                        "가상 기업 · 연결 관계 설명용"
-                    )
+        with st.expander("다른 시각과 위험 요인"):
+            st.write(item["risk"])
 
-            with st.expander("다른 시각과 위험 요인"):
-                st.write(item["risk"])
-
-        st.info(
-            "✦ AI 점검 의견 · 예시\n\n"
+    with st.container(key="ai_note"):
+        st.markdown("**✦ AI 의견 · 예시**")
+        st.write(
             "계획 발표만으로 판단하기보다는 "
-            "실제 수주와 실적을 확인할 필요가 있습니다. "
-            "현재 AI API는 연결되지 않았습니다."
+            "실제 수주와 실적을 확인할 필요가 있습니다."
+        )
+        st.caption(
+            "AI API 미연결 · 미리 작성한 예시입니다."
         )
 
-        with st.expander("📖 수주잔고란?"):
-            st.write(
-                "계약을 맺었지만 아직 납품하지 않은 "
-                "물량입니다. 향후 매출의 단서지만 "
-                "취소·지연될 수 있습니다."
-            )
+    with st.expander("📖 수주잔고"):
+        st.write(
+            "계약을 맺었지만 아직 납품하지 않은 "
+            "물량입니다. 향후 매출의 단서지만 "
+            "취소·지연될 수 있습니다."
+        )
 
-        with st.expander("출처 · 원문 보기"):
-            st.write(
-                "이 내용은 UI 검증을 위한 가상 사례입니다. "
-                "실제 보고서 출처가 없으며 "
-                "실시간 분석이 아닙니다. "
-                "자료 연결 메뉴에서 실제 원문 접근을 "
-                "확인할 수 있습니다."
-            )
+    with st.expander("출처 · 원문 보기"):
+        st.write(
+            "현재 내용은 가상 사례로 실제 보고서 "
+            "출처가 없습니다. 설정에서 원문 수집 "
+            "연결을 확인할 수 있습니다."
+        )
 
 
 # --------------------------------------------------
@@ -341,54 +522,57 @@ elif page == "내 자산":
     st.header("내 자산")
     st.write("보유내역을 직접 관리하세요.")
 
-    st.caption(
-        "이 배포 인스턴스의 공용 저장소입니다. "
-        "개인용으로 배포하세요. "
-        "클라우드 재배포 시 영구 디스크가 필요합니다."
+    st.button(
+        "＋ 자산 추가",
+        key="add_asset",
+        type="primary",
+        use_container_width=True,
+        on_click=edit,
     )
 
     assets = portfolio.all()
 
-    st.button(
-        "＋ 자산 추가",
-        type="primary",
-        use_container_width=True,
-        on_click=open_asset_form,
-    )
+    if not assets:
+        st.info(
+            "보유자산을 추가해 보세요. "
+            "예시 자산은 자동 등록하지 않습니다."
+        )
 
     for asset in assets:
         with st.container(border=True):
             st.subheader(asset["name"])
-            st.caption(asset["kind"])
+            badge(asset["kind"])
 
-            quantity_col, price_col = st.columns(2)
+            quantity_column, price_column = st.columns(2)
 
-            quantity_col.metric(
+            unit = (
+                "개"
+                if asset["kind"] == "비트코인"
+                else "주"
+            )
+
+            quantity_column.metric(
                 "보유 수량",
-                f'{asset["quantity"]:g}',
+                f'{asset["quantity"]:g}{unit}',
             )
 
-            price_col.metric(
+            price_column.metric(
                 "평균 매수가",
-                (
-                    f'{asset["price"]:,.2f} '
-                    f'{asset["currency"]}'
-                ),
+                f'{asset["price"]:,.2f} '
+                + asset["currency"],
             )
 
-            edit_col, delete_col = st.columns(2)
-
-            edit_col.button(
+            quantity_column.button(
                 "수정",
-                key="edit-" + asset["id"],
-                on_click=open_asset_form,
+                key="edit_" + asset["id"],
+                on_click=edit,
                 args=(asset,),
                 use_container_width=True,
             )
 
-            if delete_col.button(
+            if price_column.button(
                 "삭제",
-                key="delete-" + asset["id"],
+                key="delete_" + asset["id"],
                 use_container_width=True,
             ):
                 st.session_state.delete_id = asset["id"]
@@ -397,51 +581,61 @@ elif page == "내 자산":
                 st.session_state.get("delete_id")
                 == asset["id"]
             ):
-                st.warning("이 자산을 삭제할까요?")
+                st.warning("이 보유내역을 삭제할까요?")
 
-                confirm_col, cancel_col = st.columns(2)
-
-                if confirm_col.button(
+                if st.button(
                     "삭제 확인",
-                    key="confirm-" + asset["id"],
-                    use_container_width=True,
+                    key="confirm_" + asset["id"],
                 ):
                     portfolio.delete(asset["id"])
-                    st.session_state.pop("delete_id", None)
 
-                    editing = st.session_state.get(
+                    st.session_state.pop(
+                        "delete_id",
+                        None,
+                    )
+
+                    current_edit = st.session_state.get(
                         "edit_asset",
                         {},
                     )
 
-                    if editing.get("id") == asset["id"]:
+                    if (
+                        current_edit.get("id")
+                        == asset["id"]
+                    ):
                         st.session_state.show_form = False
 
                     st.rerun()
 
-                if cancel_col.button(
+                if st.button(
                     "삭제 취소",
-                    key="cancel-delete-" + asset["id"],
-                    use_container_width=True,
+                    key="cancel_" + asset["id"],
                 ):
-                    st.session_state.pop("delete_id", None)
+                    st.session_state.pop(
+                        "delete_id",
+                        None,
+                    )
                     st.rerun()
 
-    if not assets:
-        st.info(
-            "아직 보유자산이 없습니다. "
-            "자산 추가로 시작하세요."
+    if st.session_state.get("show_form"):
+        current = st.session_state.get(
+            "edit_asset",
+            {},
         )
 
-    if st.session_state.get("show_form"):
-        current = st.session_state.get("edit_asset", {})
+        revision = st.session_state.get(
+            "form_revision",
+            0,
+        )
 
         with st.form(
-            "asset_form",
-            clear_on_submit=False,
+            "asset_form_" + str(revision),
+            border=True,
         ):
             st.subheader(
-                "보유내역 수정" if current else "새 자산 등록"
+                "보유내역 수정"
+                if current
+                else "자산 추가"
             )
 
             name = st.text_input(
@@ -468,14 +662,18 @@ elif page == "내 자산":
             quantity = st.number_input(
                 "수량",
                 min_value=0.0,
-                value=float(current.get("quantity", 1)),
+                value=float(
+                    current.get("quantity", 1)
+                ),
                 format="%.6f",
             )
 
             price = st.number_input(
                 "평균 매수가",
                 min_value=0.0,
-                value=float(current.get("price", 0)),
+                value=float(
+                    current.get("price", 0)
+                ),
             )
 
             currencies = ["KRW", "USD"]
@@ -488,9 +686,9 @@ elif page == "내 자산":
                 ),
             )
 
-            save_col, cancel_col = st.columns(2)
+            save_column, cancel_column = st.columns(2)
 
-            if save_col.form_submit_button(
+            if save_column.form_submit_button(
                 "저장",
                 type="primary",
                 use_container_width=True,
@@ -511,17 +709,23 @@ elif page == "내 자산":
                 except ValueError as error:
                     st.error(str(error))
 
-            if cancel_col.form_submit_button(
+            if cancel_column.form_submit_button(
                 "취소",
                 use_container_width=True,
             ):
                 st.session_state.show_form = False
                 st.rerun()
 
+    st.caption(
+        "이 앱 인스턴스의 공용 저장소입니다. "
+        "개인용으로 사용하세요. "
+        "재배포 후 보존은 영구 저장소가 필요합니다."
+    )
+
     st.download_button(
         "보유내역 백업 JSON",
         data=json.dumps(
-            assets,
+            portfolio.all(),
             ensure_ascii=False,
             indent=2,
         ),
@@ -540,13 +744,13 @@ elif page == "인기글":
     cutoff = morning_cutoff()
 
     st.caption(
-        f"{cutoff:%m/%d %H:%M} KST 기준 · "
-        "직전 24시간 · 주제 중복 제거"
+        f"{cutoff:%m/%d %H:%M} KST · "
+        "직전 24시간 · 동일 사건 중복 제거"
     )
 
     st.info(
-        "전체 종목 토론방 수집은 미연결입니다. "
-        "아래 10개는 순위 동작 확인용 가상 게시글입니다."
+        "실제 토론방은 미연결입니다. "
+        "순위 확인용 가상 게시글입니다."
     )
 
     titles = [
@@ -568,14 +772,16 @@ elif page == "인기글":
             "topic_id": str(index),
             "views": 25000 - index * 1700,
             "published_at": (
-                cutoff - timedelta(hours=index + 1)
+                cutoff
+                - timedelta(hours=index + 1)
             ).isoformat(),
         }
         for index, title in enumerate(titles)
     ]
 
+    # 같은 사건의 조회수가 낮은 글은 제외됩니다.
     posts.append({
-        "title": "같은 관세 발언의 다른 제목",
+        "title": "동일 관세 사건",
         "topic_id": "0",
         "views": 100,
         "published_at": (
@@ -583,9 +789,10 @@ elif page == "인기글":
         ).isoformat(),
     })
 
-    ranked_posts = discussion_top(posts, cutoff)
-
-    for rank, post in enumerate(ranked_posts, 1):
+    for rank, post in enumerate(
+        discussion_top(posts, cutoff),
+        1,
+    ):
         with st.container(border=True):
             st.write(
                 f'**{rank:02d}　{post["title"]}**'
@@ -593,21 +800,20 @@ elif page == "인기글":
 
             st.caption(
                 f'가상 조회수 {post["views"]:,} · '
-                "사실 확인 안 됨 · 작성자 주장"
+                "확인되지 않은 작성자 주장"
             )
 
 
 # --------------------------------------------------
-# 자료 연결
+# 설정 / 자료 연결
 # --------------------------------------------------
 
 else:
-    st.header("자료 연결")
+    st.header("설정 · 자료 연결")
 
-    st.write(
-        "원문 접근 결과를 직접 확인합니다. "
-        "수집 결과가 샘플 분석을 "
-        "자동 대체하지는 않습니다."
+    st.caption(
+        "연결 결과는 샘플 분석을 "
+        "자동 대체하지 않습니다."
     )
 
     with st.expander(
@@ -616,17 +822,19 @@ else:
     ):
         if st.button("공개 보고서 목록 확인"):
             try:
-                with st.spinner("보고서 목록 확인 중…"):
-                    reports = naver_reports()
-
-                st.session_state.reports = reports
-                st.success("목록 수집 성공")
+                with st.spinner("목록 확인 중…"):
+                    st.session_state.reports = (
+                        naver_reports()
+                    )
 
             except Exception as error:
                 st.session_state.reports = []
                 st.error(f"수집 실패: {error}")
 
-        reports = st.session_state.get("reports", [])
+        reports = st.session_state.get(
+            "reports",
+            [],
+        )
 
         for report in reports[:5]:
             st.link_button(
@@ -640,12 +848,11 @@ else:
             and st.button("첫 보고서 PDF 본문 확인")
         ):
             try:
-                with st.spinner("PDF 본문 추출 중…"):
-                    text = pdf_text(reports[0]["pdf"])
-
                 st.text_area(
                     "추출 본문 · AI 분석 전",
-                    value=text,
+                    value=pdf_text(
+                        reports[0]["pdf"]
+                    ),
                     height=280,
                 )
 
@@ -655,43 +862,27 @@ else:
     with st.expander("인베스팅 RSS"):
         if st.button("RSS 연결 확인"):
             try:
-                with st.spinner("RSS 확인 중…"):
-                    feed_items = investing_feed()
-
-                for item in feed_items[:10]:
+                for item in investing_feed()[:10]:
                     st.link_button(
                         item["title"],
                         item["url"],
                     )
 
                 st.caption(
-                    "RSS 목록만 확인한 결과이며 "
-                    "기사 본문 확보와 구분됩니다."
+                    "RSS 목록이며 기사 본문 "
+                    "확보 결과가 아닙니다."
                 )
 
             except Exception as error:
-                st.error(
-                    f"연결 실패: {error}. "
-                    "접근 제한을 우회하지 않습니다."
-                )
+                st.error(f"연결 실패: {error}")
 
-    st.subheader("확보한 원문 직접 읽기")
-
-    st.text_area(
-        "이용 가능한 원문을 붙여넣으세요",
-        height=200,
+    st.info(
+        "자동 AI 분석·06:30 집계 실행·"
+        "07:00 카카오톡 발송은 아직 미연결입니다."
     )
 
-    st.caption(
-        "현재는 읽기용 입력입니다. "
-        "자동 요약·번역은 AI 연동 후 제공할 수 있습니다."
-    )
-
-
-st.divider()
 
 st.caption(
-    "모닝브리프 · 가상 데이터 MVP / "
-    "투자 판단을 위한 실제 리서치 서비스는 "
-    "아직 연결되지 않았습니다."
+    "강삐 · 가상 데이터 MVP · "
+    "실제 뉴스 및 투자 추천이 아닙니다."
 )
