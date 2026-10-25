@@ -5,6 +5,9 @@ import math
 import os
 import re
 import sqlite3
+import subprocess
+import sys
+import tempfile
 import time
 import uuid
 
@@ -15,7 +18,7 @@ from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
 from io import BytesIO
 from pathlib import Path
-from threading import Event, local
+from threading import local
 from urllib.parse import urljoin, urlparse
 from xml.etree import ElementTree
 from zoneinfo import ZoneInfo
@@ -25,21 +28,13 @@ import streamlit as st
 
 from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont
-from pypdf import PdfReader
 
 
 # ==================================================
-# 기본 설정
+# 설정
 # ==================================================
-
-st.set_page_config(
-    page_title="강삐 · 강민 주식비서",
-    page_icon="☀️",
-    layout="centered",
-)
 
 KST = ZoneInfo("Asia/Seoul")
-ENGINE_NAME = "무료 로컬 발췌"
 
 CATEGORIES = {
     "company": "기업분석",
@@ -116,10 +111,6 @@ THEMES = {
 }
 
 
-# ==================================================
-# 공통 함수
-# ==================================================
-
 def normalized(text):
     return " ".join(text.split())
 
@@ -130,44 +121,21 @@ def digest(text):
     ).hexdigest()
 
 
-def morning_cutoff():
-    now = datetime.now(KST)
-    cutoff = now.replace(
-        hour=6,
-        minute=30,
-        second=0,
-        microsecond=0,
-    )
-
-    if now < cutoff:
-        cutoff -= timedelta(days=1)
-
-    return cutoff
-
-
-def period_text():
-    today = datetime.now(KST).date()
-    start = today - timedelta(days=6)
-    return f"{start:%m/%d} ~ {today:%m/%d} · KST"
-
-
 # ==================================================
-# SQLite 저장소
+# 데이터베이스
 # ==================================================
 
 class Database:
     def __init__(self, path):
         self.path = str(path)
         Path(self.path).parent.mkdir(
-            parents=True,
-            exist_ok=True,
+            parents=True, exist_ok=True
         )
 
     @contextmanager
     def connection(self):
         con = sqlite3.connect(
-            self.path,
-            timeout=30,
+            self.path, timeout=30
         )
         con.row_factory = sqlite3.Row
 
@@ -204,13 +172,8 @@ class Portfolio(Database):
             ]
 
     def save(
-        self,
-        name,
-        kind,
-        quantity,
-        price,
-        currency,
-        asset_id=None,
+        self, name, kind, quantity,
+        price, currency, asset_id=None,
     ):
         if (
             not name.strip()
@@ -219,7 +182,8 @@ class Portfolio(Database):
             or currency not in ("KRW", "USD")
         ):
             raise ValueError(
-                "종목명, 양수 수량, 0 이상 매수가를 확인하세요."
+                "종목명, 양수 수량, "
+                "0 이상 매수가를 확인하세요."
             )
 
         with self.connection() as con:
@@ -247,11 +211,22 @@ class Portfolio(Database):
 
 
 class ResearchStore(Database):
-    def __init__(self, path):
-        super().__init__(path)
+    def __init__(self, path=None):
+        super().__init__(
+            path or os.getenv(
+                "RESEARCH_DB",
+                "data/research.db",
+            )
+        )
 
         with self.connection() as con:
             con.executescript("""
+                CREATE TABLE IF NOT EXISTS report_catalog (
+                    url TEXT PRIMARY KEY,
+                    payload TEXT NOT NULL,
+                    published_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS documents (
                     id TEXT PRIMARY KEY,
                     url TEXT UNIQUE NOT NULL,
@@ -287,7 +262,7 @@ class ResearchStore(Database):
                 );
             """)
 
-    def save_document(self, doc):
+    def save_document(self, doc, connection=None):
         date = datetime.fromisoformat(
             doc["published_at"]
         )
@@ -299,12 +274,12 @@ class ResearchStore(Database):
 
         if date > datetime.now(KST) + timedelta(minutes=5):
             raise ValueError(
-                "미래 발행 시각의 자료는 저장하지 않습니다."
+                "미래 발행 자료는 저장하지 않습니다."
             )
 
         if len(normalized(doc["body"])) < 200:
             raise ValueError(
-                "본문이 부족하여 저장하지 않았습니다. "
+                "본문이 부족합니다. "
                 "제목만으로 정리하지 않습니다."
             )
 
@@ -319,7 +294,7 @@ class ResearchStore(Database):
             doc["url"].encode()
         ).hexdigest()[:20]
 
-        with self.connection() as con:
+        def write(con):
             con.execute(
                 """
                 INSERT INTO documents
@@ -351,43 +326,74 @@ class ResearchStore(Database):
                 ),
             )
 
+        if connection is not None:
+            write(connection)
+        else:
+            with self.connection() as con:
+                write(con)
+
         return doc_id
 
-    def documents(self, market):
-        now = datetime.now(KST)
+    def save_documents(self, documents):
+        ids = []
 
+        with self.connection() as con:
+            for doc in documents:
+                ids.append(
+                    self.save_document(
+                        doc, connection=con
+                    )
+                )
+
+        return ids
+
+    def documents(
+        self, market, include_body=True
+    ):
+        now = datetime.now(KST)
         lower = (
             now - timedelta(days=6)
         ).replace(
-            hour=0,
-            minute=0,
-            second=0,
-            microsecond=0,
+            hour=0, minute=0,
+            second=0, microsecond=0,
+        )
+
+        columns = (
+            "*"
+            if include_body
+            else
+            "id,url,title,market,publisher,kind,"
+            "published_at,fetched_at,body_hash,author"
         )
 
         with self.connection() as con:
-            rows = [
+            return [
                 dict(row)
                 for row in con.execute(
-                    """
-                    SELECT *
+                    f"""
+                    SELECT {columns}
                     FROM documents
                     WHERE market=?
+                      AND published_at>=?
+                      AND published_at<=?
                     ORDER BY published_at DESC
                     """,
-                    (market,),
+                    (
+                        market,
+                        lower.isoformat(),
+                        now.isoformat(),
+                    ),
                 )
             ]
 
-        return [
-            row
-            for row in rows
-            if lower
-            <= datetime.fromisoformat(
-                row["published_at"]
-            )
-            <= now
-        ]
+    def document(self, doc_id):
+        with self.connection() as con:
+            row = con.execute(
+                "SELECT * FROM documents WHERE id=?",
+                (doc_id,),
+            ).fetchone()
+
+        return dict(row) if row else None
 
     def existing_urls(self):
         with self.connection() as con:
@@ -398,12 +404,89 @@ class ResearchStore(Database):
                 )
             }
 
+    def document_kinds(self):
+        with self.connection() as con:
+            return {
+                row["url"]: row["kind"]
+                for row in con.execute(
+                    "SELECT url,kind FROM documents"
+                )
+            }
+
+    def save_catalog(self, rows):
+        keys = (
+            "url", "title", "publisher",
+            "published_at", "category",
+            "api_url", "author",
+        )
+
+        with self.connection() as con:
+            for row in rows:
+                value = {
+                    key: row.get(key, "")
+                    for key in keys
+                }
+
+                con.execute(
+                    """
+                    INSERT OR REPLACE INTO report_catalog
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        row["url"],
+                        json.dumps(
+                            value,
+                            ensure_ascii=False,
+                        ),
+                        row["published_at"],
+                    ),
+                )
+
+    def catalog(self, url=None):
+        with self.connection() as con:
+            if url:
+                row = con.execute(
+                    """
+                    SELECT payload
+                    FROM report_catalog
+                    WHERE url=?
+                    """,
+                    (url,),
+                ).fetchone()
+
+                return (
+                    json.loads(row["payload"])
+                    if row else None
+                )
+
+            now = datetime.now(KST)
+            lower = (
+                now - timedelta(days=6)
+            ).replace(
+                hour=0, minute=0,
+                second=0, microsecond=0,
+            )
+
+            return [
+                json.loads(row["payload"])
+                for row in con.execute(
+                    """
+                    SELECT payload
+                    FROM report_catalog
+                    WHERE published_at>=?
+                      AND published_at<=?
+                    ORDER BY published_at DESC
+                    """,
+                    (
+                        lower.isoformat(),
+                        now.isoformat(),
+                    ),
+                )
+            ]
+
     def log_run(
-        self,
-        source,
-        started_at,
-        status,
-        detail,
+        self, source, started_at,
+        status, detail,
     ):
         with self.connection() as con:
             con.execute(
@@ -438,11 +521,8 @@ class ResearchStore(Database):
             ]
 
     def save_analysis(
-        self,
-        market,
-        fingerprint,
-        payload,
-        document_ids,
+        self, market, fingerprint,
+        payload, document_ids,
     ):
         with self.connection() as con:
             con.execute(
@@ -455,7 +535,7 @@ class ResearchStore(Database):
                     fingerprint,
                     datetime.now(KST).isoformat(),
                     "로컬 규칙 기반",
-                    ENGINE_NAME,
+                    "무료 로컬 발췌",
                     json.dumps(
                         payload,
                         ensure_ascii=False,
@@ -481,11 +561,9 @@ class ResearchStore(Database):
             return None
 
         result = dict(row)
-
         result["payload"] = json.loads(
             result["payload"]
         )
-
         result["document_ids"] = json.loads(
             result["document_ids"]
         )
@@ -494,7 +572,7 @@ class ResearchStore(Database):
 
 
 # ==================================================
-# 공개 원문 요청
+# HTTPS 요청
 # ==================================================
 
 class SourceAccessError(ValueError):
@@ -508,7 +586,6 @@ class CollectionIncomplete(ValueError):
 def http_session():
     if not hasattr(HTTP_LOCAL, "session"):
         HTTP_LOCAL.session = requests.Session()
-
     return HTTP_LOCAL.session
 
 
@@ -544,8 +621,7 @@ def fetch(url, max_bytes=20_000_000):
             if response.status_code == 403:
                 raise SourceAccessError(
                     f"{parsed.hostname} HTTP 403: "
-                    "이 서버의 자동 요청이 거부됐습니다. "
-                    "해당 출처 수집을 중단합니다."
+                    "이 서버의 자동 요청이 거부됐습니다."
                 )
 
             response.raise_for_status()
@@ -553,26 +629,22 @@ def fetch(url, max_bytes=20_000_000):
             chunks = []
             total = 0
 
-            for chunk in response.iter_content(
-                64 * 1024
-            ):
+            for chunk in response.iter_content(65536):
                 total += len(chunk)
 
                 if total > max_bytes:
                     raise ValueError(
-                        "원문 다운로드 용량 제한 "
-                        "20MB를 초과했습니다."
+                        "다운로드 용량 한도를 초과했습니다."
                     )
 
                 chunks.append(chunk)
 
             response._content = b"".join(chunks)
             response._content_consumed = True
-
             return response
 
     raise ValueError(
-        "리다이렉트 횟수를 초과했습니다."
+        "리다이렉트 횟수 초과"
     )
 
 
@@ -585,97 +657,177 @@ def parse_date(value):
         )
     except ValueError:
         try:
-            result = parsedate_to_datetime(
-                value
-            )
+            result = parsedate_to_datetime(value)
         except (ValueError, TypeError):
-            formats = [
+            for fmt in (
                 "%Y.%m.%d",
                 "%y.%m.%d",
                 "%Y-%m-%d",
                 "%Y-%m-%d %H:%M:%S",
-            ]
-
-            for fmt in formats:
+            ):
                 try:
                     result = datetime.strptime(
-                        value,
-                        fmt,
+                        value, fmt
                     )
                     break
                 except ValueError:
                     continue
             else:
                 raise ValueError(
-                    "발행일 형식을 확인할 수 없습니다."
+                    "발행일을 확인할 수 없습니다."
                 )
 
     if result.tzinfo is None:
-        result = result.replace(
-            tzinfo=KST
-        )
+        result = result.replace(tzinfo=KST)
 
     return result.astimezone(KST)
 
 
-def pdf_text(url_or_bytes):
-    if isinstance(url_or_bytes, bytes):
-        content = url_or_bytes
-    else:
-        content = fetch(
-            url_or_bytes
-        ).content
+# ==================================================
+# PDF: 선택한 한 건만 별도 프로세스에서 처리
+# ==================================================
 
-    if len(content) > 20_000_000:
-        raise ValueError(
-            "PDF 최대 크기는 20MB입니다."
-        )
+PDF_PARSER = r'''
+import json
+import sys
 
-    if not content.lstrip().startswith(
-        b"%PDF"
-    ):
-        raise ValueError(
-            "PDF 응답이 아닙니다. "
-            "원문 주소를 확인하세요."
-        )
-
-    reader = PdfReader(
-        BytesIO(content)
+try:
+    import resource
+    resource.setrlimit(
+        resource.RLIMIT_AS,
+        (384*1024*1024, 384*1024*1024)
     )
+    resource.setrlimit(
+        resource.RLIMIT_CPU,
+        (30, 30)
+    )
+except ImportError:
+    pass
+
+from pypdf import PdfReader
+
+try:
+    reader = PdfReader(sys.argv[1])
 
     if len(reader.pages) > 200:
+        raise ValueError("200쪽을 초과한 PDF입니다.")
+
+    parts = []
+    total = 0
+
+    for page in reader.pages:
+        text = page.extract_text() or ""
+        total += len(text)
+
+        if total > 1500000:
+            raise ValueError(
+                "본문 크기가 처리 한도를 초과했습니다."
+            )
+
+        parts.append(text)
+
+    result = "\n".join(parts)
+
+    if len(result.strip()) < 200:
         raise ValueError(
-            "이 실행 환경에서는 200쪽 이하 "
-            "PDF를 처리합니다."
+            "본문 미확보: 이미지 PDF는 OCR이 필요합니다."
         )
 
-    text = "\n".join(
-        page.extract_text() or ""
-        for page in reader.pages
+    print(json.dumps(
+        {"text": result},
+        ensure_ascii=False
+    ))
+
+except Exception as error:
+    print(json.dumps(
+        {"error": type(error).__name__ + ": " + str(error)[:250]},
+        ensure_ascii=False
+    ))
+    sys.exit(2)
+'''
+
+
+def extract_pdf_isolated(content):
+    if (
+        len(content) > 20_000_000
+        or not content.lstrip().startswith(b"%PDF")
+    ):
+        raise ValueError(
+            "유효한 20MB 이하 PDF가 아닙니다."
+        )
+
+    fd, path = tempfile.mkstemp(
+        prefix="gangppi-",
+        suffix=".pdf",
     )
 
-    if len(text.strip()) < 200:
-        raise ValueError(
-            "본문 추출 실패: 이미지 PDF는 "
-            "OCR 또는 별도 확인이 필요합니다."
-        )
+    try:
+        with os.fdopen(fd, "wb") as file:
+            file.write(content)
 
-    return text
+        try:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    PDF_PARSER,
+                    path,
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=40,
+            )
+        except subprocess.TimeoutExpired:
+            raise ValueError(
+                "PDF 처리 시간이 초과됐습니다. "
+                "앱 전체를 멈추지 않고 이 파일 처리를 중단합니다."
+            ) from None
+
+        try:
+            payload = json.loads(
+                result.stdout
+            )
+        except (ValueError, TypeError):
+            raise ValueError(
+                "PDF 처리 프로세스가 종료됐습니다. "
+                "메모리·시간 한도를 초과했을 수 있습니다."
+            ) from None
+
+        if (
+            result.returncode
+            or payload.get("error")
+        ):
+            raise ValueError(
+                payload.get(
+                    "error",
+                    "PDF 처리 실패",
+                )
+            )
+
+        return payload["text"]
+
+    finally:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+
+def pdf_text(url_or_bytes):
+    content = (
+        url_or_bytes
+        if isinstance(url_or_bytes, bytes)
+        else fetch(url_or_bytes).content
+    )
+    return extract_pdf_isolated(content)
 
 
 # ==================================================
-# 네이버: 최근 7일 날짜 경계까지 수집
+# 네이버 최근 7일 공개 본문 수집
 # ==================================================
 
-def naver_reports(
-    category,
-    progress=None,
-):
-    if category not in CATEGORIES:
-        raise ValueError(
-            "지원하지 않는 분류입니다."
-        )
-
+def naver_reports(category, page_size=50):
     today = datetime.now(KST).date()
     cutoff = today - timedelta(days=6)
 
@@ -687,21 +839,17 @@ def naver_reports(
         url = (
             "https://stock.naver.com/api/"
             "stockSecurity/researches/v2/"
-            f"{category}?index={index}&size=15"
+            f"{category}?index={index}&size={page_size}"
         )
 
         data = fetch(url).json()
 
         if (
             not isinstance(data, dict)
-            or not isinstance(
-                data.get("items"),
-                list,
-            )
+            or not isinstance(data.get("items"), list)
         ):
             raise CollectionIncomplete(
-                "네이버 목록 형식이 변경됐습니다. "
-                "일주일 수집을 완료하지 못했습니다."
+                "네이버 목록 형식이 변경됐습니다."
             )
 
         items = data["items"]
@@ -709,8 +857,7 @@ def naver_reports(
         if not items:
             if data.get("hasNext"):
                 raise CollectionIncomplete(
-                    "빈 목록인데 다음 페이지가 "
-                    "있다고 응답했습니다."
+                    "빈 목록에 다음 페이지가 표시됐습니다."
                 )
             break
 
@@ -718,9 +865,7 @@ def naver_reports(
         new_ids = 0
 
         for item in items:
-            nid = str(
-                item.get("nid", "")
-            )
+            nid = str(item.get("nid", ""))
 
             if (
                 not nid.isdigit()
@@ -728,14 +873,10 @@ def naver_reports(
                 or not item.get("title")
             ):
                 raise CollectionIncomplete(
-                    "필수 보고서 정보가 누락되어 "
-                    "기간 전체 목록을 확인하지 못했습니다."
+                    "필수 보고서 정보가 누락됐습니다."
                 )
 
-            date = parse_date(
-                item["writeDate"]
-            )
-
+            date = parse_date(item["writeDate"])
             dates.append(date.date())
 
             if nid in seen:
@@ -744,11 +885,13 @@ def naver_reports(
             seen.add(nid)
             new_ids += 1
 
-            if (
-                date.date() < cutoff
-                or date.date() > today
-            ):
+            if not cutoff <= date.date() <= today:
                 continue
+
+            body = BeautifulSoup(
+                item.get("content") or "",
+                "html.parser",
+            ).get_text(" ", strip=True)
 
             result.append({
                 "title": item["title"],
@@ -768,16 +911,10 @@ def naver_reports(
                 ),
                 "category": category,
                 "author": item.get(
-                    "analystName",
-                    "",
+                    "analystName", ""
                 ),
+                "public_body": body,
             })
-
-        if progress:
-            progress(
-                f"{CATEGORIES[category]}: "
-                f"기간 내 목록 {len(result)}건 확인"
-            )
 
         if (
             any(date < cutoff for date in dates)
@@ -787,12 +924,135 @@ def naver_reports(
 
         if not new_ids:
             raise CollectionIncomplete(
-                "같은 목록이 반복됩니다. "
-                "날짜 경계에 도달하지 못했습니다."
+                "같은 목록이 반복되어 수집을 중단했습니다."
             )
 
         index += 1
         time.sleep(0.15)
+
+    return result
+
+
+def collect_naver_fast(store, progress=None):
+    started = datetime.now(KST).isoformat()
+    kinds = store.document_kinds()
+
+    saved = 0
+    reused = 0
+    candidates = 0
+    errors = []
+    warnings = []
+    completed = []
+
+    with ThreadPoolExecutor(
+        max_workers=3
+    ) as pool:
+        jobs = {
+            pool.submit(
+                naver_reports,
+                category,
+                page_size=50,
+            ): category
+            for category in CATEGORIES
+        }
+
+        for future in as_completed(jobs):
+            category = jobs[future]
+
+            try:
+                rows = future.result()
+                candidates += len(rows)
+
+                store.save_catalog(rows)
+                docs = []
+
+                for row in rows:
+                    previous = kinds.get(
+                        row["url"]
+                    )
+
+                    # 이미 저장한 PDF 전문을
+                    # 짧은 공개 발췌로 덮어쓰지 않습니다.
+                    if (
+                        previous
+                        and "공개페이지" not in previous
+                    ):
+                        reused += 1
+                        continue
+
+                    body = row.get(
+                        "public_body", ""
+                    )
+
+                    if len(normalized(body)) < 200:
+                        warnings.append(
+                            row["title"][:70]
+                            + ": 공개 본문이 짧아 목록만 저장했습니다."
+                        )
+                        continue
+
+                    docs.append({
+                        "title": row["title"],
+                        "url": row["url"],
+                        "market": "국내",
+                        "publisher": row["publisher"],
+                        "kind": (
+                            "증권사 공개페이지 발췌 · "
+                            + CATEGORIES[category]
+                            + " (PDF 전체 아님)"
+                        ),
+                        "published_at": row[
+                            "published_at"
+                        ],
+                        "body": body,
+                        "author": row.get(
+                            "author", ""
+                        ),
+                    })
+
+                store.save_documents(docs)
+
+                saved += len(docs)
+                completed.append(category)
+
+                if progress:
+                    progress(
+                        f"{CATEGORIES[category]} 저장 완료 · "
+                        f"공개 본문 {saved}건 · "
+                        f"기존 전문 {reused}건 유지"
+                    )
+
+            except Exception as error:
+                errors.append(
+                    CATEGORIES[category]
+                    + ": "
+                    + str(error)[:300]
+                )
+
+    result = {
+        "saved": saved,
+        "reused": reused,
+        "candidates": candidates,
+        "errors": errors,
+        "warnings": warnings,
+        "blocked": any(
+            "403" in error
+            for error in errors
+        ),
+        "completed_categories": completed,
+        "coverage": (
+            "최근 7일 공개페이지 본문 발췌입니다. "
+            "PDF 전체 내용이 아닙니다. "
+            "기존 PDF 전문은 유지합니다."
+        ),
+    }
+
+    store.log_run(
+        "naver-fast",
+        started,
+        "partial" if errors or warnings else "success",
+        result,
+    )
 
     return result
 
@@ -807,25 +1067,22 @@ def naver_document(report):
         or not detail.get("attachUrl")
     ):
         raise ValueError(
-            "보고서 PDF 주소를 확보하지 못했습니다."
+            "PDF 주소를 확보하지 못했습니다."
         )
 
-    date = parse_date(
-        detail.get("writeDate")
-        or report["published_at"]
-    )
-
     return {
-        "title": (
-            detail.get("title")
-            or report["title"]
+        "title": detail.get(
+            "title", report["title"]
         ),
         "url": report["url"],
         "publisher": (
             detail.get("brokerName")
             or report["publisher"]
         ),
-        "published_at": date.isoformat(),
+        "published_at": parse_date(
+            detail.get("writeDate")
+            or report["published_at"]
+        ).isoformat(),
         "body": pdf_text(
             detail["attachUrl"]
         ),
@@ -833,7 +1090,7 @@ def naver_document(report):
         "kind": (
             "증권사 "
             + CATEGORIES[report["category"]]
-            + " PDF"
+            + " PDF 전문"
         ),
         "author": (
             detail.get("analystName")
@@ -842,37 +1099,62 @@ def naver_document(report):
     }
 
 
+def upgrade_naver_pdf(store, url):
+    report = store.catalog(url=url)
+
+    if not report:
+        raise ValueError(
+            "목록을 찾지 못했습니다. "
+            "네이버 빠른 수집을 먼저 실행하세요."
+        )
+
+    parsed = urlparse(report["url"])
+
+    if (
+        parsed.hostname != "stock.naver.com"
+        or not re.fullmatch(
+            r"/research/(company|industry|invest|economy)/\d+",
+            parsed.path,
+        )
+    ):
+        raise ValueError(
+            "지원하는 네이버 보고서 주소가 아닙니다."
+        )
+
+    doc = naver_document(report)
+    store.save_document(doc)
+    return len(doc["body"])
+
+
 # ==================================================
-# 인베스팅 RSS / 실제 기사 본문
+# 인베스팅
 # ==================================================
 
 def investing_feed():
-    response = fetch(
-        "https://kr.investing.com/rss/news.rss"
-    )
-
     root = ElementTree.fromstring(
-        response.content
+        fetch(
+            "https://kr.investing.com/rss/news.rss"
+        ).content
     )
 
-    result = []
+    items = []
 
     for item in root.findall(".//item"):
         title = item.findtext("title")
         url = item.findtext("link")
 
         if title and url:
-            result.append({
+            items.append({
                 "title": title,
                 "url": url,
             })
 
-    if not result:
+    if not items:
         raise ValueError(
             "RSS 항목을 찾지 못했습니다."
         )
 
-    return result
+    return items
 
 
 def article_metadata(soup):
@@ -885,13 +1167,11 @@ def article_metadata(soup):
             data = json.loads(
                 script.get_text()
             )
-
             objects.extend(
                 data
                 if isinstance(data, list)
                 else [data]
             )
-
         except (ValueError, TypeError):
             continue
 
@@ -935,17 +1215,13 @@ def investing_article(item):
 
     meta = article_metadata(soup)
 
-    accessible = str(
+    if str(
         meta.get(
-            "isAccessibleForFree",
-            "true",
+            "isAccessibleForFree", "true"
         )
-    ).lower()
-
-    if accessible == "false":
+    ).lower() == "false":
         raise ValueError(
-            "구독 또는 접근 제한된 본문은 "
-            "수집하지 않습니다."
+            "구독 또는 접근 제한된 기사입니다."
         )
 
     date = meta.get("datePublished")
@@ -958,8 +1234,7 @@ def investing_article(item):
         )
     ):
         raise ValueError(
-            "시간대가 포함된 기사 발행일을 "
-            "확보하지 못했습니다."
+            "기사 발행 시각을 확인할 수 없습니다."
         )
 
     content = soup.select_one(
@@ -969,18 +1244,16 @@ def investing_article(item):
 
     if not content:
         raise ValueError(
-            "기사 본문 미확보. "
-            "제목만으로 정리하지 않습니다."
+            "기사 본문을 확보하지 못했습니다."
         )
 
     for tag in content.select(
-        "script, style, aside, button"
+        "script,style,aside,button"
     ):
         tag.decompose()
 
     body = content.get_text(
-        "\n",
-        strip=True,
+        "\n", strip=True
     )
 
     if len(body) < 200:
@@ -1007,10 +1280,10 @@ def investing_article(item):
         "url": item["url"],
         "body": body,
         "market": "해외",
+        "publisher": "Investing.com",
         "published_at": parse_date(
             date
         ).isoformat(),
-        "publisher": "Investing.com",
         "kind": (
             "기고자 분석"
             if "/analysis/" in item["url"]
@@ -1020,197 +1293,89 @@ def investing_article(item):
     }
 
 
-# ==================================================
-# 수집 실행
-# ==================================================
-
-def collect_sources(
-    store,
-    source,
-    progress=None,
-):
+def collect_investing(store, progress=None):
     started = datetime.now(KST).isoformat()
-    today = datetime.now(KST).date()
-    cutoff = today - timedelta(days=6)
 
-    saved = []
+    saved = 0
     reused = 0
-    skipped = 0
     errors = []
-    candidates = []
-    completed_categories = []
     blocked = False
+    candidates = []
 
     existing = store.existing_urls()
+    today = datetime.now(KST).date()
+    lower = today - timedelta(days=6)
 
     try:
-        if source == "investing":
-            candidates = investing_feed()
+        candidates = investing_feed()
 
-        elif source == "naver":
-            for category in CATEGORIES:
-                try:
-                    candidates.extend(
-                        naver_reports(
-                            category,
-                            progress=progress,
-                        )
-                    )
-                    completed_categories.append(
-                        category
-                    )
-                except Exception as error:
-                    errors.append(
-                        f"{CATEGORIES[category]}: "
-                        f"{type(error).__name__}: "
-                        f"{str(error)[:400]}"
-                    )
-
-        else:
-            raise ValueError(
-                "지원하지 않는 출처입니다."
-            )
-
-        candidates = list({
-            item["url"]: item
-            for item in candidates
-        }.values())
-
-        pending = []
-
-        for item in candidates:
+        for index, item in enumerate(candidates):
             if item["url"] in existing:
                 reused += 1
-            else:
-                pending.append(item)
+                continue
 
-        stop = Event()
-
-        def download(item):
-            if stop.is_set():
-                return None
+            if progress:
+                progress(
+                    "인베스팅 본문 확인 "
+                    f"{index + 1}/{len(candidates)}"
+                )
 
             try:
-                if source == "investing":
-                    return investing_article(item)
+                doc = investing_article(item)
 
-                return naver_document(item)
-
-            except SourceAccessError:
-                stop.set()
-                raise
-
-            finally:
-                time.sleep(0.2)
-
-        with ThreadPoolExecutor(
-            max_workers=4
-        ) as executor:
-            jobs = {
-                executor.submit(
-                    download,
-                    item,
-                ): item
-                for item in pending
-            }
-
-            for index, future in enumerate(
-                as_completed(jobs)
-            ):
-                item = jobs[future]
-
-                if progress:
-                    progress(
-                        f"본문 확인 "
-                        f"{index + 1}/{len(pending)} · "
-                        f"저장 {len(saved)} · "
-                        f"기존 재사용 {reused}"
-                    )
-
-                try:
-                    doc = future.result()
-
-                    if doc is None:
-                        continue
-
-                    date = parse_date(
+                if (
+                    lower
+                    <= parse_date(
                         doc["published_at"]
                     ).date()
+                    <= today
+                ):
+                    store.save_document(doc)
+                    saved += 1
 
-                    if date < cutoff or date > today:
-                        skipped += 1
-                        continue
+            except SourceAccessError as error:
+                errors.append(str(error))
+                blocked = True
+                break
 
-                    saved.append(
-                        store.save_document(doc)
-                    )
-
-                except SourceAccessError as error:
-                    if not blocked:
-                        errors.append(
-                            f'{item["title"][:70]}: '
-                            f"{error}"
-                        )
-                    blocked = True
-
-                except Exception as error:
-                    errors.append(
-                        f'{item["title"][:70]}: '
-                        f"{type(error).__name__}: "
-                        f"{str(error)[:400]}"
-                    )
+            except Exception as error:
+                errors.append(
+                    item["title"][:60]
+                    + ": "
+                    + str(error)[:250]
+                )
 
     except SourceAccessError as error:
         errors.append(str(error))
         blocked = True
 
     except Exception as error:
-        errors.append(
-            f"{type(error).__name__}: "
-            f"{str(error)[:400]}"
-        )
+        errors.append(str(error)[:300])
 
-    detail = {
-        "saved": len(set(saved)),
+    result = {
+        "saved": saved,
         "reused": reused,
-        "candidates": len(candidates),
-        "outside_window": skipped,
         "errors": errors,
         "blocked": blocked,
-        "period_start": cutoff.isoformat(),
-        "period_end": today.isoformat(),
-        "completed_categories": completed_categories,
+        "candidates": len(candidates),
         "coverage": (
-            "最近7日 누적분과 현재 RSS 목록입니다. "
-            "RSS 이전 자료의 소급 확보는 보장되지 않습니다."
-            if source == "investing"
-            else
-            "오늘 포함 최근 7일 · 날짜 경계까지 탐색 · "
-            "기존 본문 재사용"
+            "인베스팅 최신 RSS 누적분입니다. "
+            "과거 일주일 전체를 소급 확보하지는 못합니다."
         ),
     }
 
-    if errors and (saved or reused):
-        status = "partial"
-    elif errors:
-        status = "failed"
-    elif saved or reused:
-        status = "success"
-    else:
-        status = "empty"
-
     store.log_run(
-        source,
+        "investing",
         started,
-        status,
-        detail,
+        "partial" if errors else "success",
+        result,
     )
 
-    return detail
+    return result
 
 
 # ==================================================
-# 무료 원문 분류 / 발췌
+# 무료 분류와 원문 발췌
 # ==================================================
 
 def select_documents(documents):
@@ -1226,33 +1391,29 @@ def select_documents(documents):
 
 
 def analysis_fingerprint(documents, assets):
-    data = {
-        "engine": "local-extractive-v1",
-        "documents": sorted(
-            (
-                doc["id"],
-                doc["body_hash"],
-                doc["title"],
-                doc["publisher"],
-            )
-            for doc in documents
-        ),
-        "holdings": sorted(
-            (
-                asset["name"],
-                asset["kind"],
-            )
-            for asset in assets
-        ),
-    }
-
-    return digest(
-        json.dumps(
-            data,
-            sort_keys=True,
-            ensure_ascii=False,
-        )
-    )
+    return digest(json.dumps(
+        {
+            "engine": "local-extractive-v1",
+            "documents": sorted(
+                (
+                    doc["id"],
+                    doc["body_hash"],
+                    doc["title"],
+                    doc["publisher"],
+                )
+                for doc in documents
+            ),
+            "holdings": sorted(
+                (
+                    asset["name"],
+                    asset["kind"],
+                )
+                for asset in assets
+            ),
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+    ))
 
 
 def choose_theme(doc):
@@ -1265,7 +1426,6 @@ def choose_theme(doc):
     ).casefold()
 
     lead = body[:2500]
-
     best_theme = "기업 실적 · 업황"
     best_score = 0
 
@@ -1280,14 +1440,12 @@ def choose_theme(doc):
         ]
 
         title_hits = [
-            term
-            for term in hits
+            term for term in hits
             if term in title
         ]
 
         lead_hits = [
-            term
-            for term in hits
+            term for term in hits
             if term in lead
         ]
 
@@ -1319,33 +1477,26 @@ def excerpt(doc, theme):
     keywords = THEMES.get(theme, [])
     candidates = []
 
-    excluded = [
-        "무단 배포",
-        "투자판단의 최종",
-        "Compliance Notice",
-        "투자의견 비율",
-    ]
-
     for number, sentence in enumerate(sentences):
         if len(sentence) < 35:
             continue
 
         if any(
             word in sentence
-            for word in excluded
+            for word in (
+                "무단 배포",
+                "투자판단의 최종",
+                "Compliance Notice",
+                "투자의견 비율",
+            )
         ):
             continue
 
-        windows = [
-            sentence[start:start + 320]
-            for start in range(
-                0,
-                len(sentence),
-                220,
-            )
-        ]
+        for start in range(
+            0, len(sentence), 220
+        ):
+            piece = sentence[start:start + 320]
 
-        for piece in windows:
             hangul = sum(
                 "가" <= char <= "힣"
                 for char in piece
@@ -1372,19 +1523,12 @@ def excerpt(doc, theme):
                 for term in keywords
             ) * 3
 
-            score += 2 * bool(
-                re.search(
-                    r"\d[\d,.]*\s*"
-                    r"(%|억원|조원|원|달러)",
-                    piece,
-                )
-            )
+            score += 2 * bool(re.search(
+                r"\d[\d,.]*\s*(%|억원|조원|원|달러)",
+                piece,
+            ))
 
-            score += min(
-                hangul / 60,
-                3,
-            )
-
+            score += min(hangul / 60, 3)
             score -= number * 0.015
 
             candidates.append(
@@ -1426,21 +1570,38 @@ def analyze_free(
     documents,
     assets,
     market,
+    load_document,
     progress=None,
 ):
     documents = select_documents(documents)
 
     if not documents:
         raise ValueError(
-            "최근 7일 내 확보한 실제 본문이 없습니다."
+            "확보한 실제 본문이 없습니다."
         )
+
+    def full(doc):
+        result = load_document(
+            doc["id"]
+        )
+
+        if not result:
+            raise ValueError(
+                "저장된 원문을 찾지 못했습니다."
+            )
+
+        return result
 
     grouped = defaultdict(list)
 
     for index, doc in enumerate(documents):
+        current = full(doc)
+
         grouped[
-            choose_theme(doc)
+            choose_theme(current)
         ].append(doc)
+
+        del current
 
         if progress and (
             index % 20 == 0
@@ -1448,8 +1609,7 @@ def analyze_free(
         ):
             progress(
                 f"원문 분류 "
-                f"{index + 1}/{len(documents)}건 · "
-                "유료 API 사용 없음"
+                f"{index + 1}/{len(documents)}건"
             )
 
     ranked = sorted(
@@ -1472,23 +1632,24 @@ def analyze_free(
             representative_documents(group)
         )
 
-        facts = []
-
-        for doc in representatives:
-            facts.append({
+        facts = [
+            {
                 "text": doc["title"],
                 "source_id": doc["id"],
                 "quote": excerpt(
-                    doc,
-                    theme,
+                    full(doc), theme
                 ),
-            })
+            }
+            for doc in representatives
+        ]
 
         related = []
         used_names = set()
 
         for asset in assets:
-            name = normalized(asset["name"])
+            name = normalized(
+                asset["name"]
+            )
 
             if (
                 len(name) < 2
@@ -1497,20 +1658,19 @@ def analyze_free(
                 continue
 
             for doc in group:
-                body = normalized(doc["body"])
+                body = normalized(
+                    full(doc)["body"]
+                )
 
-                location = (
-                    body.casefold().find(
-                        name.casefold()
-                    )
+                location = body.casefold().find(
+                    name.casefold()
                 )
 
                 if location < 0:
                     continue
 
                 start = max(
-                    0,
-                    location - 50,
+                    0, location - 50
                 )
 
                 end = min(
@@ -1521,7 +1681,7 @@ def analyze_free(
                 related.append({
                     "name": asset["name"],
                     "reason": (
-                        "원문에서 등록 자산명이 확인됩니다. "
+                        "등록 자산명이 본문에서 확인됩니다. "
                         "투자 영향은 별도로 판단하세요."
                     ),
                     "source_id": doc["id"],
@@ -1536,30 +1696,37 @@ def analyze_free(
             for doc in group
         })
 
+        basis = (
+            "공개페이지 발췌 포함"
+            if any(
+                "공개페이지" in doc["kind"]
+                for doc in group
+            )
+            else "저장된 PDF·기사 본문"
+        )
+
         issues.append({
-            "title": (
-                theme + " 리서치 모아보기"
-            ),
+            "title": theme + " 리서치 모아보기",
             "category": theme,
+            "basis": basis,
             "summary": facts[0]["quote"],
             "impact": (
-                f"관련 단어 기준 본문 {len(group)}건 · "
+                f"관련 본문 {len(group)}건 · "
                 f"발행사/매체 {publishers}곳. "
-                "동일 의견의 합의가 아니라 수집 범위입니다."
+                "같은 의견의 합의가 아니라 수집 범위입니다."
             ),
             "check_note": (
-                "아래 원문 발췌와 서로 다른 출처를 "
-                "비교하세요. 이 화면은 새로운 AI 해석이나 "
+                "대표 원문과 서로 다른 출처를 비교하세요. "
+                "이 화면은 새로운 AI 해석이나 "
                 "투자 의견을 생성하지 않습니다."
             ),
             "facts": facts,
             "risks": [
                 "키워드 분류와 원문 발췌 결과입니다. "
-                "분류가 부정확하거나 문맥이 "
-                "생략될 수 있습니다."
+                "분류 오류나 문맥 생략이 있을 수 있습니다."
             ],
             "checks": [
-                "원문 발행일과 수치의 기준 시점을 확인하세요.",
+                "발행일과 수치의 기준 시점을 확인하세요.",
                 "작성자의 전망과 실제 발표 실적을 구분하세요.",
             ],
             "related_assets": related,
@@ -1567,41 +1734,26 @@ def analyze_free(
                 asset["name"]
                 for asset in related
             ],
-            "source_ids": [
-                doc["id"]
-                for doc in representatives
-            ],
-            "document_count": len(group),
         })
 
     return {
         "issues": issues,
-        "method": (
-            "무료 로컬 원문 발췌 · 키워드 분류"
-        ),
+        "method": "무료 원문 발췌 · 키워드 분류",
         "coverage": {
             "documents": len(documents),
-            "full_text_processed": True,
             "api_calls": 0,
         },
     }
 
 
 # ==================================================
-# 국내 / 해외 카드뉴스 이미지
+# 카드뉴스 이미지
 # ==================================================
 
-def render_card(
-    market,
-    issues,
-    generated_at,
-):
-    if (
-        market not in ("국내", "해외")
-        or not 1 <= len(issues) <= 3
-    ):
+def render_card(market, issues, generated_at):
+    if not 1 <= len(issues) <= 3:
         raise ValueError(
-            "카드로 만들 실제 원문 정리 결과가 필요합니다."
+            "카드로 만들 실제 정리 결과가 필요합니다."
         )
 
     font_path = os.getenv(
@@ -1617,43 +1769,31 @@ def render_card(
         )
 
     image = Image.new(
-        "RGB",
-        (1080, 1350),
-        "white",
+        "RGB", (1080, 1350), "white"
     )
-
     draw = ImageDraw.Draw(image)
     fonts = {}
 
     def font(size):
         if size not in fonts:
             fonts[size] = ImageFont.truetype(
-                font_path,
-                size,
+                font_path, size
             )
         return fonts[size]
 
     def write(
-        text,
-        x,
-        y,
-        size=30,
-        color="#182127",
+        text, x, y,
+        size=30, color="#182127",
     ):
         draw.text(
-            (x, y),
-            text,
+            (x, y), text,
             font=font(size),
             fill=color,
         )
 
     def wrapped(
-        text,
-        x,
-        y,
-        size,
-        width,
-        max_lines,
+        text, x, y,
+        size, width, max_lines,
     ):
         rows = []
         line = ""
@@ -1694,17 +1834,14 @@ def render_card(
         "강민 주식비서 · 강삐",
         50, 30, 25, "#68717a",
     )
-
     write(
         f"아침 7시 · {market}",
         50, 80, 29, "#008783",
     )
-
     write(
         f"오늘 주목할 주제 {len(issues)}",
         50, 130, 61,
     )
-
     write(
         "정리 생성 "
         + generated_at[:16]
@@ -1725,12 +1862,10 @@ def render_card(
             item["category"],
             50, y, 27, 960, 1,
         )
-
         wrapped(
             item["title"],
             50, y + 45, 42, 960, 2,
         )
-
         wrapped(
             item["summary"],
             50, y + 155, 27, 960, 2,
@@ -1741,260 +1876,136 @@ def render_card(
             fill="#eef1f3",
         )
 
-        names = item.get("names", [])
-
-        label = (
-            "자산명 언급  " + " · ".join(names)
-            if names
-            else "상세 원문과 출처는 앱에서 확인"
-        )
-
         wrapped(
-            label,
+            item.get(
+                "basis",
+                "저장된 실제 원문 발췌",
+            ),
             55, y + 248, 23, 960, 1,
         )
 
     write(
-        "원문 핵심 발췌 · 키워드 분류 · "
-        "상세 출처는 앱에서 확인",
+        "공개페이지/PDF 범위와 출처는 앱에서 확인",
         50, 1250, 23, "#68717a",
     )
-
     write(
-        "매수·매도 추천이 아닙니다.",
+        "원문 발췌 · 투자 추천이 아닙니다.",
         50, 1290, 22, "#68717a",
     )
 
     result = BytesIO()
-    image.save(
-        result,
-        format="PNG",
-    )
-
+    image.save(result, format="PNG")
     return result.getvalue()
 
 
 # ==================================================
-# 모바일 화면 스타일
+# 모바일 UI
 # ==================================================
 
-st.markdown(
-    """
-    <style>
+st.set_page_config(
+    page_title="강삐 · 강민 주식비서",
+    page_icon="☀️",
+    layout="centered",
+)
+
+st.markdown("""
+<style>
+.block-container {
+    max-width: 560px;
+    padding: 1.4rem 1rem 5rem;
+}
+h1 { font-size: 1.85rem !important; }
+h2 { font-size: 1.4rem !important; }
+h3 { font-size: 1.08rem !important; }
+p { line-height: 1.6; }
+.brand {
+    font-size: 13px;
+    color: #8590a3;
+}
+.badge {
+    display: inline-block;
+    background: #eaf0ff;
+    color: #425bd0;
+    padding: 4px 10px;
+    border-radius: 8px;
+    font-size: 12px;
+}
+button { min-height: 44px !important; }
+
+[data-testid="stHorizontalBlock"] {
+    flex-wrap: nowrap !important;
+}
+[data-testid="stColumn"] {
+    min-width: 0 !important;
+    width: auto !important;
+}
+
+.st-key-navigation {
+    background: #f6f7fb;
+    border: 1px solid #e3e6ef;
+    border-radius: 12px;
+    padding: 4px;
+}
+.st-key-navigation [data-testid="stHorizontalBlock"] {
+    gap: 4px !important;
+}
+.st-key-navigation button {
+    border: 0 !important;
+    background: transparent !important;
+}
+.st-key-navigation button p {
+    color: #263249 !important;
+    white-space: nowrap;
+}
+.st-key-navigation button[kind="primary"] {
+    background: #505bd1 !important;
+}
+.st-key-navigation button[kind="primary"] p {
+    color: white !important;
+}
+
+[data-testid="stRadio"] > div[role="radiogroup"] {
+    display: flex;
+    background: #f6f7fb;
+    border-radius: 10px;
+    padding: 4px;
+    gap: 0 !important;
+}
+[data-testid="stRadio"] label[data-baseweb="radio"] {
+    flex: 1;
+    justify-content: center;
+    padding: 8px 4px;
+    margin: 0 !important;
+    border-radius: 7px;
+}
+[data-testid="stRadio"] label[data-baseweb="radio"] p {
+    color: #263249 !important;
+}
+[data-testid="stRadio"]
+label[data-baseweb="radio"]:has(input:checked) {
+    background: #505bd1;
+}
+[data-testid="stRadio"]
+label[data-baseweb="radio"]:has(input:checked) p {
+    color: white !important;
+}
+[data-testid="stRadio"]
+label[data-baseweb="radio"] > div:first-child {
+    display: none;
+}
+[data-testid="stToolbar"] {
+    display: none;
+}
+@media(max-width: 600px) {
     .block-container {
-        max-width: 540px;
-        padding: 1.5rem 1rem 7rem;
+        padding-top: 1rem;
     }
-
-    [data-testid="stToolbar"] {
-        display: none;
-    }
-
-    h1 {
-        font-size: 1.9rem !important;
-        letter-spacing: -1px;
-    }
-
-    h2 {
-        font-size: 1.45rem !important;
-    }
-
-    h3 {
-        font-size: 1.08rem !important;
-    }
-
-    p {
-        line-height: 1.6;
-    }
-
-    .brand {
-        font-size: 13px;
-        color: #777f92;
-    }
-
-    .badge {
-        display: inline-block;
-        border-radius: 8px;
-        padding: 4px 10px;
-        background: #eaf0ff;
-        color: #425bd0;
-        font-size: 12px;
-        font-weight: 600;
-    }
-
-    .purple {
-        background: #f0eaff;
-        color: #8d51c9;
-    }
-
-    .teal {
-        background: #e3f2ef;
-        color: #148579;
-    }
-
-    .tag {
-        display: inline-block;
-        padding: 4px 12px;
-        border-radius: 8px;
-        background: #eef0ff;
-        color: #303c77;
-        font-size: 13px;
-        margin: 5px;
-    }
-
-    button {
-        min-height: 44px !important;
-    }
-
-    button[kind="primary"],
-    button[kind="primaryFormSubmit"] {
-        background: #505bd1;
-        border-color: #505bd1;
-    }
-
-    [data-testid="stHorizontalBlock"] {
-        flex-wrap: nowrap !important;
-    }
-
-    [data-testid="stColumn"] {
-        min-width: 0 !important;
-        width: auto !important;
-    }
-
-    div[data-testid="stMetricValue"] {
-        font-size: 1.15rem;
-    }
-
-    .st-key-navigation {
-        position: static;
-        width: 100%;
-        padding: 4px;
-        background: #f6f7fb;
-        border: 1px solid #e3e6ef;
-        border-radius: 12px;
-    }
-
-    .st-key-navigation
-    [data-testid="stHorizontalBlock"] {
-        gap: 4px !important;
-    }
-
-    .st-key-navigation button {
-        background: transparent !important;
-        border: 0 !important;
-        border-radius: 8px;
-        padding: 4px !important;
-        color: #263249 !important;
-    }
-
-    .st-key-navigation button p {
-        color: #263249 !important;
-        font-weight: 600;
-        white-space: nowrap;
-    }
-
-    .st-key-navigation button[kind="primary"] {
-        background: #505bd1 !important;
-        color: #ffffff !important;
-    }
-
-    .st-key-navigation button[kind="primary"] p {
-        color: #ffffff !important;
-    }
-
-    .st-key-navigation button:focus-visible {
-        outline: 2px solid #505bd1 !important;
-        outline-offset: 2px;
-    }
-
-    [data-testid="stRadio"],
-    [data-testid="stRadio"] > div {
-        width: 100% !important;
-    }
-
-    [data-testid="stRadio"]
-    > div[role="radiogroup"] {
-        background: #f6f7fb;
-        border: 1px solid #e3e6ef;
-        border-radius: 10px;
-        padding: 3px;
-        display: flex;
-        gap: 0 !important;
-    }
-
-    [data-testid="stRadio"]
-    label[data-baseweb="radio"] {
-        flex: 1;
-        justify-content: center;
-        margin: 0 !important;
-        padding: 8px 4px;
-        border-radius: 7px;
-        color: #263249 !important;
-    }
-
-    [data-testid="stRadio"]
-    label[data-baseweb="radio"] p {
-        color: #263249 !important;
-    }
-
-    [data-testid="stRadio"]
-    label[data-baseweb="radio"]:has(input:checked) {
-        background: #505bd1;
-        color: #ffffff !important;
-    }
-
-    [data-testid="stRadio"]
-    label[data-baseweb="radio"]:has(input:checked) p {
-        color: #ffffff !important;
-    }
-
-    [data-testid="stRadio"]
-    label[data-baseweb="radio"] > div:first-child {
-        display: none;
-    }
-
-    [data-testid="stRadio"]
-    label[data-baseweb="radio"]:focus-within {
-        outline: 2px solid #505bd1;
-        outline-offset: 2px;
-    }
-
-    .st-key-check_note {
-        background: #edf0ff;
-        border-radius: 12px;
-        padding: 15px;
-    }
-
-    .st-key-check_note,
-    .st-key-check_note p {
-        color: #263249 !important;
-    }
-
-    @media (max-width: 600px) {
-        .block-container {
-            padding-top: 1rem;
-        }
-
-        h1 {
-            font-size: 1.7rem !important;
-        }
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+}
+</style>
+""", unsafe_allow_html=True)
 
 
-# ==================================================
-# 앱 상태
-# ==================================================
-
-store = ResearchStore(
-    os.getenv(
-        "RESEARCH_DB",
-        "data/research.db",
-    )
-)
+store = ResearchStore()
 
 portfolio = Portfolio(
     os.getenv(
@@ -2004,167 +2015,184 @@ portfolio = Portfolio(
 )
 
 st.session_state.setdefault(
-    "page",
-    "오늘",
+    "page", "오늘"
 )
 
 
-def go(page, index=None):
+def go(page, index=0):
     st.session_state.page = page
-
-    if index is not None:
-        st.session_state.selected = index
+    st.session_state.selected = index
 
 
 def edit(asset=None):
-    st.session_state.edit_asset = asset or {}
-    st.session_state.show_form = True
+    st.session_state.asset = asset or {}
     st.session_state.form_revision = (
         st.session_state.get(
-            "form_revision",
-            0,
+            "form_revision", 0
         ) + 1
     )
+    st.session_state.form_open = True
 
 
-def badge(text, color=""):
+def badge(text):
     st.markdown(
-        f'<span class="badge {color}">'
-        f"{html.escape(text)}</span>",
+        '<span class="badge">'
+        + html.escape(text)
+        + "</span>",
         unsafe_allow_html=True,
     )
 
 
 def context(market):
-    documents = store.documents(market)
-    selected = select_documents(documents)
+    docs = select_documents(
+        store.documents(
+            market,
+            include_body=False,
+        )
+    )
+
     assets = portfolio.all()
 
     fingerprint = analysis_fingerprint(
-        selected,
-        assets,
+        docs, assets
     )
 
     saved = store.analysis(
-        market,
-        fingerprint,
+        market, fingerprint
     )
 
-    return (
-        documents,
-        selected,
-        assets,
-        fingerprint,
-        saved,
+    return docs, assets, fingerprint, saved
+
+
+@st.cache_data(
+    show_spinner=False,
+    max_entries=6,
+)
+def image_card(market, issues, date):
+    return render_card(
+        market, issues, date
     )
 
 
-def source_panel(documents):
-    if not documents:
+def source_view(docs, market):
+    if not docs:
         st.info(
-            "최근 7일 내 본문을 확보한 자료가 없습니다. "
-            "설정에서 수집하거나 실제 원문을 등록하세요."
+            "확보한 본문이 없습니다. "
+            "톱니바퀴에서 빠른 수집을 실행하세요."
         )
         return
 
     st.caption(
-        f"최근 7일 저장 본문 {len(documents)}건. "
-        "해당 기간 전체 시장 자료를 "
-        "모두 확보했다는 뜻은 아닙니다."
+        f"본문 {len(docs)}건 · "
+        "목록은 10건씩, 본문은 한 건만 표시합니다."
     )
 
-    for doc in documents:
-        with st.expander(doc["title"]):
-            st.caption(
-                f'{doc["publisher"]} · '
-                f'{doc["kind"]} · '
-                f'{doc["published_at"][:16]} KST'
-            )
+    page = st.selectbox(
+        "원문 목록 페이지",
+        range(
+            1,
+            (len(docs) + 9) // 10 + 1,
+        ),
+        key="source_page_" + market,
+    )
 
-            if doc.get("author"):
-                st.caption(
-                    "작성자: " + doc["author"]
-                )
+    rows = docs[
+        (page - 1) * 10:page * 10
+    ]
 
-            st.link_button(
-                "원문 열기",
-                doc["url"],
-            )
+    mapping = {
+        doc["id"]: doc
+        for doc in rows
+    }
 
-            st.text(
-                doc["body"][:4000]
-            )
+    key = st.selectbox(
+        "읽을 원문",
+        list(mapping),
+        format_func=lambda value: (
+            mapping[value]["title"]
+        ),
+        key=f"source_{market}_{page}",
+    )
 
-            st.caption(
-                "실제 본문 미리보기입니다."
-            )
-
-
-def generate(market):
-    (
-        documents,
-        selected,
-        assets,
-        fingerprint,
-        saved,
-    ) = context(market)
+    doc = mapping[key]
 
     st.caption(
-        f"최근 7일 중복 제외 본문 "
-        f"{len(selected)}건 전체 · "
-        "원문 발췌와 키워드 분류 · "
-        "유료 모델 API 호출 0회"
+        doc["publisher"]
+        + " · "
+        + doc["kind"]
+        + " · "
+        + doc["published_at"][:10]
+    )
+
+    st.link_button(
+        "원문 열기",
+        doc["url"],
+    )
+
+    if st.checkbox(
+        "선택한 본문 미리보기",
+        key="preview_" + market,
+    ):
+        full = store.document(key)
+
+        if full:
+            st.text_area(
+                "본문 일부",
+                full["body"][:4000],
+                height=230,
+                disabled=True,
+                key="body_" + key,
+            )
+
+
+def summarize(
+    market, docs,
+    assets, fingerprint,
+):
+    st.caption(
+        "최근 7일 저장 본문을 키워드로 분류하고 "
+        "실제 문장을 발췌합니다. "
+        "유료 AI API를 사용하지 않습니다."
     )
 
     if st.button(
         "무료로 원문 정리",
-        key="analyze_" + market,
-        disabled=not selected,
         type="primary",
+        disabled=not docs,
         use_container_width=True,
     ):
         try:
             with st.spinner(
-                "원문을 분류하고 "
-                "핵심 문장을 추출하고 있습니다…"
+                "저장된 원문 정리 중…"
             ):
                 progress = st.empty()
 
-                payload = analyze_free(
-                    selected,
+                result = analyze_free(
+                    docs,
                     assets,
                     market,
+                    load_document=store.document,
                     progress=progress.info,
                 )
 
                 store.save_analysis(
                     market,
                     fingerprint,
-                    payload,
+                    result,
                     [
                         doc["id"]
-                        for doc in selected
+                        for doc in docs
                     ],
                 )
 
             st.rerun()
 
         except Exception as error:
-            st.error(
-                f"결과를 저장하지 않았습니다: {error}"
-            )
-
-    if saved:
-        st.caption(
-            f'정리 생성 '
-            f'{saved["generated_at"][:16]} KST · '
-            f'{saved["model"]} · '
-            f'본문 {len(saved["document_ids"])}건'
-        )
+            st.error(str(error))
 
 
 # ==================================================
-# 상단 이름 / 날짜 / 메뉴
+# 상단
 # ==================================================
 
 st.markdown(
@@ -2172,64 +2200,50 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-heading, settings = st.columns([6, 1])
+a, b = st.columns([6, 1])
+a.title("강삐")
 
-heading.title("강삐")
-
-settings.button(
+b.button(
     "⚙",
-    key="settings",
-    help="자료 연결 및 설정",
     on_click=go,
     args=("설정",),
+    help="수집 및 설정",
 )
 
-page = st.session_state.page
 now = datetime.now(KST)
 
-weekdays = [
-    "월", "화", "수", "목", "금", "토", "일"
-]
-
-date_column, status_column = st.columns(
-    [3, 1]
+st.caption(
+    f"{now:%Y.%m.%d} · 최근 7일 "
+    f"{now - timedelta(days=6):%m.%d}"
+    f"~{now:%m.%d} · KST"
 )
-
-date_column.caption(
-    f"{now.month}월 {now.day}일 "
-    f"{weekdays[now.weekday()]}요일 · KST"
-)
-
-with status_column:
-    badge("무료 원문 정리")
 
 with st.container(key="navigation"):
-    for column, label, icon in zip(
+    for col, label in zip(
         st.columns(4),
         ["오늘", "분석", "인기글", "내 자산"],
-        ["⌂", "⌕", "▤", "♙"],
     ):
-        column.button(
-            f"{icon} {label}",
+        col.button(
+            label,
             key="nav_" + label,
+            on_click=go,
+            args=(label,),
             type=(
                 "primary"
-                if page == label
+                if st.session_state.page == label
                 else "secondary"
             ),
             use_container_width=True,
-            on_click=go,
-            args=(label,),
         )
 
+page = st.session_state.page
+
 
 # ==================================================
-# 오늘
+# 오늘 / 분석
 # ==================================================
 
-if page == "오늘":
-    st.header("오늘 알아둘 이야기")
-
+if page in ("오늘", "분석"):
     market = st.radio(
         "시장",
         ["국내", "해외", "비트코인"],
@@ -2239,208 +2253,148 @@ if page == "오늘":
         key="market",
     )
 
-    st.caption(
-        "자료 기간: " + period_text()
+    docs, assets, fingerprint, saved = context(
+        market
     )
 
-    (
-        documents,
-        selected,
-        assets,
-        fingerprint,
-        saved,
-    ) = context(market)
+    if page == "오늘":
+        st.header(
+            "오늘 알아둘 이야기"
+        )
 
-    if saved:
-        for index, item in enumerate(
-            saved["payload"]["issues"]
-        ):
-            with st.container(border=True):
-                badge(
-                    item["category"],
-                    ["", "purple", "teal"][index % 3],
-                )
+        if saved:
+            st.caption(
+                "원문 발췌 · 키워드 분류 · 생성 "
+                + saved["generated_at"][:16]
+            )
 
-                st.subheader(
-                    item["title"]
-                )
-
-                st.write(
-                    item["summary"]
-                )
-
-                st.caption(
-                    "수집 범위 · 원문 비교"
-                )
-
-                st.write(
-                    item["impact"]
-                )
-
-                if item["names"]:
-                    st.markdown(
-                        " ".join(
-                            '<span class="tag">'
-                            + html.escape(name)
-                            + "</span>"
-                            for name in item["names"]
-                        ),
-                        unsafe_allow_html=True,
+            for index, item in enumerate(
+                saved["payload"]["issues"]
+            ):
+                with st.container(border=True):
+                    badge(
+                        item["category"]
                     )
 
-                st.button(
-                    "분석 보기 ›",
-                    key=f"issue_{market}_{index}",
-                    on_click=go,
-                    args=("분석", index),
-                    use_container_width=True,
-                )
+                    st.subheader(
+                        item["title"]
+                    )
 
-    else:
-        st.info(
-            "현재 자료와 보유내역에 맞는 "
-            "정리 결과가 없습니다. "
-            "설정에서 자료를 수집한 다음 "
-            "무료로 원문 정리를 눌러주세요."
+                    st.write(
+                        item["summary"]
+                    )
+
+                    st.caption(
+                        item["impact"]
+                    )
+
+                    st.button(
+                        "분석 보기 ›",
+                        key=f"issue_{market}_{index}",
+                        on_click=go,
+                        args=("분석", index),
+                        use_container_width=True,
+                    )
+
+        else:
+            st.info(
+                "아직 정리 결과가 없습니다. "
+                "자료를 수집하고 아래 버튼을 눌러주세요."
+            )
+
+        summarize(
+            market, docs,
+            assets, fingerprint,
         )
 
-    generate(market)
-
-    with st.expander(
-        "확보한 실제 원문",
-        expanded=not bool(saved),
-    ):
-        source_panel(documents)
-
-    with st.container(border=True):
-        st.write(
-            "**내 자산 연결**"
-        )
-
-        st.caption(
-            f"등록 자산 {len(assets)}개. "
-            "원문에서 자산명이 언급되는지 확인합니다. "
-            "투자 영향을 자동 판단하는 기능은 아닙니다."
-        )
-
-        st.button(
-            "자산 관리",
-            on_click=go,
-            args=("내 자산",),
-        )
-
-    with st.expander(
-        "카카오톡용 카드뉴스 · 국내 / 해외"
-    ):
-        st.caption(
-            "국내 1장·해외 1장. "
-            "실제 정리 결과가 있는 시장만 생성합니다. "
-            "카카오톡 자동 발송은 아직 미연결입니다."
-        )
-
-        for target, column in zip(
-            ["국내", "해외"],
-            st.columns(2),
+        with st.expander(
+            "확보한 실제 원문",
+            expanded=not bool(saved),
         ):
-            target_analysis = context(
-                target
-            )[4]
+            source_view(docs, market)
 
-            if not target_analysis:
-                column.info(
-                    f"{target} 원문 정리 대기"
-                )
-                continue
+        with st.expander(
+            "카카오톡용 카드뉴스 · 국내 / 해외"
+        ):
+            st.caption(
+                "국내 1장·해외 1장. "
+                "공유용 PNG이며 자동 발송은 미연결입니다."
+            )
 
-            try:
-                data = render_card(
-                    target,
-                    target_analysis[
-                        "payload"
-                    ]["issues"],
-                    target_analysis[
-                        "generated_at"
-                    ],
-                )
+            for col, target in zip(
+                st.columns(2),
+                ["국내", "해외"],
+            ):
+                target_saved = context(
+                    target
+                )[3]
 
-                column.download_button(
-                    f"{target} 카드 PNG",
-                    data=data,
-                    file_name=(
-                        f"gangppi-{target}.png"
-                    ),
-                    mime="image/png",
-                    key="card_" + target,
-                    use_container_width=True,
-                )
+                if not target_saved:
+                    col.info(
+                        target + " 정리 대기"
+                    )
+                    continue
 
-            except (ValueError, OSError) as error:
-                column.warning(
-                    str(error)
-                )
+                try:
+                    data = image_card(
+                        target,
+                        target_saved[
+                            "payload"
+                        ]["issues"],
+                        target_saved[
+                            "generated_at"
+                        ],
+                    )
 
+                    col.download_button(
+                        target + " 카드 PNG",
+                        data,
+                        file_name=(
+                            f"gangppi-{target}.png"
+                        ),
+                        mime="image/png",
+                        use_container_width=True,
+                    )
 
-# ==================================================
-# 상세
-# ==================================================
+                except Exception as error:
+                    col.warning(str(error))
 
-elif page == "분석":
-    st.button(
-        "‹ 오늘로",
-        on_click=go,
-        args=("오늘",),
-    )
-
-    market = st.session_state.get(
-        "market",
-        "국내",
-    )
-
-    (
-        documents,
-        selected,
-        assets,
-        fingerprint,
-        saved,
-    ) = context(market)
-
-    if not saved:
+    elif not saved:
         st.header(
             "원문 정리 대기"
         )
 
-        generate(market)
-        source_panel(documents)
+        summarize(
+            market, docs,
+            assets, fingerprint,
+        )
+
+        source_view(docs, market)
 
     else:
         issues = saved[
             "payload"
         ]["issues"]
 
-        index = min(
-            st.session_state.get(
-                "selected",
-                0,
-            ),
-            len(issues) - 1,
-        )
-
-        selected_index = st.selectbox(
+        index = st.selectbox(
             "이슈 선택",
             range(len(issues)),
-            index=index,
+            index=min(
+                st.session_state.get(
+                    "selected", 0
+                ),
+                len(issues) - 1,
+            ),
             format_func=lambda value: (
                 issues[value]["title"]
             ),
         )
 
-        item = issues[
-            selected_index
-        ]
+        item = issues[index]
 
         mapping = {
             doc["id"]: doc
-            for doc in documents
+            for doc in docs
         }
 
         badge(
@@ -2457,7 +2411,6 @@ elif page == "분석":
             index=1,
             horizontal=True,
             width="stretch",
-            label_visibility="collapsed",
         )
 
         with st.container(border=True):
@@ -2470,138 +2423,78 @@ elif page == "분석":
             )
 
             st.caption(
-                "수집 범위 · 원문 비교"
-            )
-
-            st.write(
                 item["impact"]
             )
 
         if mode == "상세":
-            with st.container(border=True):
-                st.subheader(
-                    "대표 원문과 출처"
+            for fact in item["facts"]:
+                doc = mapping.get(
+                    fact["source_id"]
                 )
 
-                for fact in item["facts"]:
-                    doc = mapping[
-                        fact["source_id"]
-                    ]
+                if not doc:
+                    continue
 
+                with st.container(border=True):
                     st.write(
-                        fact["text"]
+                        "**"
+                        + doc["title"]
+                        + "**"
                     )
 
                     st.caption(
-                        f'{doc["publisher"]} · '
-                        f'{doc["kind"]}'
+                        doc["publisher"]
+                        + " · "
+                        + doc["kind"]
                     )
 
                     st.text(
-                        "원문 발췌: "
-                        + fact["quote"]
+                        fact["quote"]
                     )
 
                     st.link_button(
-                        "출처 확인",
+                        "원문 확인",
                         doc["url"],
                     )
 
             with st.expander(
-                "등록 자산명 언급",
-                expanded=True,
+                "보유자산명 언급"
             ):
                 if not item["related_assets"]:
                     st.write(
-                        "본문에서 등록 자산명을 "
-                        "확인하지 못했습니다."
+                        "등록 자산명이 확인되지 않았습니다."
                     )
 
                 for asset in item["related_assets"]:
                     st.write(
-                        f'**{asset["name"]}** — '
-                        f'{asset["reason"]}'
+                        "**"
+                        + asset["name"]
+                        + "**"
+                    )
+
+                    st.write(
+                        asset["reason"]
                     )
 
                     st.text(
-                        "언급된 원문: "
-                        + asset["quote"]
-                    )
-
-                    st.link_button(
-                        "언급 원문",
-                        mapping[
-                            asset["source_id"]
-                        ]["url"],
+                        asset["quote"]
                     )
 
             with st.expander(
-                "읽을 때 참고할 점"
+                "확인할 점",
+                expanded=True,
             ):
-                for risk in item["risks"]:
+                for text in (
+                    item["checks"]
+                    + item["risks"]
+                ):
                     st.write(
-                        "• " + risk
+                        "• " + text
                     )
 
-            with st.expander(
-                "다음에 확인할 사항"
-            ):
-                for check in item["checks"]:
-                    st.write(
-                        "• " + check
-                    )
-
-        with st.container(
-            key="check_note"
-        ):
-            st.markdown(
-                "**확인할 점**"
-            )
-
-            st.write(
-                item["check_note"]
-            )
-
-            st.caption(
-                "유료 모델 API를 사용하지 않는 "
-                "원문 발췌 방식입니다."
-            )
-
-        with st.expander(
-            "📖 수주잔고"
-        ):
-            st.write(
-                "계약을 맺었지만 아직 납품하지 않은 "
-                "물량입니다. 향후 매출의 단서지만 "
-                "취소·지연될 수 있습니다."
-            )
-
-        with st.expander(
-            "정리 범위 · 전체 출처"
-        ):
-            st.caption(
-                f'생성: '
-                f'{saved["generated_at"][:16]} KST · '
-                f'{saved["model"]}'
-            )
-
-            st.write(
-                "최근 7일 저장 본문 "
-                f'{len(saved["document_ids"])}건을 '
-                "키워드로 분류하고 대표 문장을 발췌했습니다. "
-                "수집 실패 자료는 포함되지 않습니다."
-            )
-
-            for source_id in saved["document_ids"]:
-                doc = mapping.get(
-                    source_id
-                )
-
-                if doc:
-                    st.link_button(
-                        doc["title"],
-                        doc["url"],
-                    )
+        st.info(
+            item["check_note"]
+        )
 
 
 # ==================================================
@@ -2613,24 +2506,18 @@ elif page == "내 자산":
         "내 자산"
     )
 
-    st.write(
-        "보유내역을 직접 관리하세요."
-    )
-
     st.button(
         "＋ 자산 추가",
-        key="add_asset",
+        on_click=edit,
         type="primary",
         use_container_width=True,
-        on_click=edit,
     )
 
     assets = portfolio.all()
 
     if not assets:
         st.info(
-            "아직 보유자산이 없습니다. "
-            "자산 추가로 시작하세요."
+            "보유자산을 추가해 보세요."
         )
 
     for asset in assets:
@@ -2645,21 +2532,15 @@ elif page == "내 자산":
 
             a, b = st.columns(2)
 
-            unit = (
-                "개"
-                if asset["kind"] == "비트코인"
-                else "주"
-            )
-
             a.metric(
                 "보유 수량",
-                f'{asset["quantity"]:g}{unit}',
+                f'{asset["quantity"]:g}',
             )
 
             b.metric(
                 "평균 매수가",
                 f'{asset["price"]:,.2f} '
-                + asset["currency"],
+                f'{asset["currency"]}',
             )
 
             a.button(
@@ -2686,7 +2567,7 @@ elif page == "내 자산":
                 == asset["id"]
             ):
                 st.warning(
-                    "이 보유내역을 삭제할까요?"
+                    "삭제할까요?"
                 )
 
                 if st.button(
@@ -2696,21 +2577,10 @@ elif page == "내 자산":
                     portfolio.delete(
                         asset["id"]
                     )
-
                     st.session_state.pop(
-                        "delete_id",
-                        None,
+                        "delete_id", None
                     )
-
-                    if (
-                        st.session_state.get(
-                            "edit_asset",
-                            {},
-                        ).get("id")
-                        == asset["id"]
-                    ):
-                        st.session_state.show_form = False
-
+                    st.session_state.form_open = False
                     st.rerun()
 
                 if st.button(
@@ -2718,41 +2588,28 @@ elif page == "내 자산":
                     key="cancel_" + asset["id"],
                 ):
                     st.session_state.pop(
-                        "delete_id",
-                        None,
+                        "delete_id", None
                     )
-
                     st.rerun()
 
     if st.session_state.get(
-        "show_form"
+        "form_open"
     ):
-        current = st.session_state.get(
-            "edit_asset",
-            {},
-        )
-
-        revision = st.session_state.get(
-            "form_revision",
-            0,
+        asset = st.session_state.get(
+            "asset", {}
         )
 
         with st.form(
-            "asset_form_" + str(revision),
-            border=True,
-        ):
-            st.subheader(
-                "보유내역 수정"
-                if current
-                else "자산 추가"
+            "asset_form_"
+            + str(
+                st.session_state.get(
+                    "form_revision", 0
+                )
             )
-
+        ):
             name = st.text_input(
                 "종목",
-                value=current.get(
-                    "name",
-                    "",
-                ),
+                asset.get("name", ""),
             )
 
             kinds = [
@@ -2767,9 +2624,8 @@ elif page == "내 자산":
                 "자산 유형",
                 kinds,
                 index=kinds.index(
-                    current.get(
-                        "kind",
-                        "국내주식",
+                    asset.get(
+                        "kind", "국내주식"
                     )
                 ),
             )
@@ -2778,9 +2634,8 @@ elif page == "내 자산":
                 "수량",
                 min_value=0.0,
                 value=float(
-                    current.get(
-                        "quantity",
-                        1,
+                    asset.get(
+                        "quantity", 1
                     )
                 ),
                 format="%.6f",
@@ -2790,25 +2645,18 @@ elif page == "내 자산":
                 "평균 매수가",
                 min_value=0.0,
                 value=float(
-                    current.get(
-                        "price",
-                        0,
+                    asset.get(
+                        "price", 0
                     )
                 ),
             )
 
-            currencies = [
-                "KRW",
-                "USD",
-            ]
-
             currency = st.selectbox(
                 "통화",
-                currencies,
-                index=currencies.index(
-                    current.get(
-                        "currency",
-                        "KRW",
+                ["KRW", "USD"],
+                index=["KRW", "USD"].index(
+                    asset.get(
+                        "currency", "KRW"
                     )
                 ),
             )
@@ -2827,40 +2675,37 @@ elif page == "내 자산":
                         quantity,
                         price,
                         currency,
-                        current.get("id"),
+                        asset.get("id"),
                     )
 
-                    st.session_state.show_form = False
+                    st.session_state.form_open = False
                     st.rerun()
 
                 except ValueError as error:
-                    st.error(
-                        str(error)
-                    )
+                    st.error(str(error))
 
             if b.form_submit_button(
                 "취소",
                 use_container_width=True,
             ):
-                st.session_state.show_form = False
+                st.session_state.form_open = False
                 st.rerun()
 
-    st.caption(
-        "이 앱 인스턴스의 공용 저장소입니다. "
-        "개인용으로 사용하세요. "
-        "Streamlit 재배포 후 보존은 "
-        "영구 저장소가 필요합니다."
-    )
-
     st.download_button(
-        "보유내역 백업 JSON",
-        data=json.dumps(
+        "보유내역 백업",
+        json.dumps(
             portfolio.all(),
             ensure_ascii=False,
             indent=2,
         ),
-        file_name="portfolio.json",
-        mime="application/json",
+        "portfolio.json",
+        "application/json",
+    )
+
+    st.caption(
+        "개인용 공용 저장소입니다. "
+        "Streamlit 재배포 후 데이터 보존에는 "
+        "영구 저장소가 필요합니다."
     )
 
 
@@ -2873,51 +2718,36 @@ elif page == "인기글":
         "사람들이 많이 본 이야기"
     )
 
-    cutoff = morning_cutoff()
-
-    st.caption(
-        f"{cutoff:%m/%d %H:%M} KST · "
-        "직전 24시간"
-    )
-
     st.info(
-        "실제 전체 종목 토론방 데이터는 "
-        "아직 연결되지 않았습니다. "
-        "가상 순위와 조회수는 표시하지 않습니다."
+        "실제 전체 종목 토론방 수집은 미연결입니다. "
+        "가상 순위를 표시하지 않습니다."
     )
 
 
 # ==================================================
-# 설정 / 수집 / 직접 등록
+# 수집 / 설정
 # ==================================================
 
 else:
     st.header(
-        "설정 · 실제 자료 연결"
+        "자료 수집 · 설정"
     )
 
-    st.subheader(
-        "원문 수집"
-    )
-
-    st.caption(
-        "기간: " + period_text()
-    )
-
-    st.write(
-        "네이버는 최근 7일의 날짜 경계까지 읽고, "
-        "이미 저장한 본문은 재사용합니다."
-    )
-
-    st.caption(
-        "인베스팅은 RSS 수집분을 누적합니다. "
-        "첫 실행에 과거 일주일 전체를 "
-        "복원할 수 있는 방식은 아닙니다."
+    st.info(
+        "빠른 수집은 공개페이지 본문 발췌입니다. "
+        "PDF 전문은 필요한 보고서 한 건만 "
+        "선택해서 읽습니다."
     )
 
     for source, label in [
-        ("naver", "네이버 리서치 수집"),
-        ("investing", "인베스팅 뉴스 수집"),
+        (
+            "naver",
+            "최근 7일 네이버 빠른 수집",
+        ),
+        (
+            "investing",
+            "인베스팅 뉴스 수집",
+        ),
     ]:
         if st.button(
             label,
@@ -2925,45 +2755,42 @@ else:
             use_container_width=True,
         ):
             with st.spinner(
-                "원문을 확인하고 저장하고 있습니다…"
+                "본문 수집 중…"
             ):
                 progress = st.empty()
 
-                result = collect_sources(
-                    store,
-                    source,
-                    progress=progress.info,
-                )
+                if source == "naver":
+                    result = collect_naver_fast(
+                        store,
+                        progress=progress.info,
+                    )
+                else:
+                    result = collect_investing(
+                        store,
+                        progress=progress.info,
+                    )
 
-            if result["saved"]:
-                st.success(
-                    f'새 본문 {result["saved"]}건 저장 · '
-                    f'기존 {result["reused"]}건 재사용'
-                )
+            st.success(
+                f'본문 저장 {result["saved"]}건 · '
+                f'기존 재사용 {result["reused"]}건'
+            )
 
-            elif result["reused"]:
-                st.success(
-                    f'기존 본문 '
-                    f'{result["reused"]}건 재사용'
-                )
-
-            elif not result["errors"]:
+            if result.get("warnings"):
                 st.warning(
-                    "최근 7일 내 저장 가능한 "
-                    "본문이 없습니다."
+                    "공개 본문이 짧은 "
+                    f'{len(result["warnings"])}건은 '
+                    "목록만 저장했습니다. "
+                    "아래에서 PDF를 선택해 읽을 수 있습니다."
                 )
 
-            if result["blocked"]:
+            for error in result["errors"][:3]:
+                st.error(error)
+
+            if result.get("blocked"):
                 st.warning(
-                    "이 배포 서버에서 출처 접근이 "
-                    "거부됐습니다. 기존 자료는 보존됩니다. "
-                    "아래 기사 본문 직접 등록을 "
-                    "사용할 수 있습니다."
-                )
-
-            for error in result["errors"]:
-                st.error(
-                    error
+                    "이 배포 서버의 접근이 거부됐습니다. "
+                    "기존 자료는 보존됩니다. "
+                    "실제 본문 직접 등록을 사용할 수 있습니다."
                 )
 
             st.caption(
@@ -2971,20 +2798,59 @@ else:
             )
 
     with st.expander(
-        "수집 실행 기록"
+        "선택한 보고서 PDF 전문 읽기"
     ):
-        runs = store.runs()
+        catalog = store.catalog()
 
-        if not runs:
-            st.write(
-                "아직 수집 기록이 없습니다."
+        if catalog:
+            mapping = {
+                row["url"]: row
+                for row in catalog
+            }
+
+            chosen = st.selectbox(
+                "보고서 선택",
+                list(mapping),
+                format_func=lambda url: (
+                    mapping[url]["title"]
+                ),
             )
 
-        for run in runs:
-            st.write(
-                f'{run["source"]} · '
-                f'{run["status"]} · '
-                f'{run["finished_at"][:16]} KST'
+            if st.button(
+                "선택한 PDF 한 건만 읽기"
+            ):
+                try:
+                    with st.spinner(
+                        "PDF 한 건 처리 중 · 최대 40초…"
+                    ):
+                        chars = upgrade_naver_pdf(
+                            store,
+                            chosen,
+                        )
+
+                    st.success(
+                        f"PDF 전문 {chars:,}자 저장. "
+                        "원문 정리를 다시 실행하세요."
+                    )
+
+                except Exception as error:
+                    st.error(str(error))
+
+        else:
+            st.caption(
+                "빠른 수집을 먼저 실행하세요."
+            )
+
+    with st.expander(
+        "수집 기록"
+    ):
+        for run in store.runs():
+            st.caption(
+                run["source"]
+                + " · "
+                + run["status"]
+                + " · "
+                + run["finished_at"][:16]
             )
 
             st.json(
@@ -2993,52 +2859,31 @@ else:
                 )
             )
 
-    st.subheader(
-        "무료 정리 방식"
-    )
-
-    st.success(
-        "OpenAI API 미사용 · "
-        "API 키 불필요 · "
-        "모델 호출 비용 없음"
-    )
-
-    st.write(
-        "최근 7일 원문을 키워드로 묶고 "
-        "실제 문장을 발췌합니다. "
-        "새로운 AI 의견이나 인과관계 분석은 "
-        "생성하지 않습니다."
-    )
-
     with st.expander(
-        "보유한 보고서 PDF 직접 등록"
+        "실제 원문 직접 등록 · 기사 또는 PDF"
     ):
         st.caption(
-            "실제 이용 가능한 원문만 등록하세요. "
-            "발행일과 원문 링크를 확인해 입력하세요."
+            "403으로 가져오지 못한 기사도 "
+            "정상적으로 읽을 수 있는 실제 본문을 "
+            "직접 등록할 수 있습니다."
         )
 
         with st.form(
-            "upload_document"
+            "manual"
         ):
-            uploaded = st.file_uploader(
-                "PDF 파일",
-                type=["pdf"],
-            )
-
             title = st.text_input(
-                "보고서 제목"
+                "제목"
             )
 
             publisher = st.text_input(
-                "발행사"
+                "출처"
             )
 
             url = st.text_input(
-                "공개 원문 링크 (https://)"
+                "원문 HTTPS 링크"
             )
 
-            published = st.date_input(
+            date = st.date_input(
                 "발행일",
                 value=datetime.now(KST).date(),
                 max_value=datetime.now(KST).date(),
@@ -3049,17 +2894,23 @@ else:
                 ["국내", "해외", "비트코인"],
             )
 
+            body = st.text_area(
+                "실제 기사 본문"
+            )
+
+            uploaded = st.file_uploader(
+                "또는 PDF 업로드",
+                type=["pdf"],
+            )
+
             if st.form_submit_button(
-                "실제 본문 저장"
+                "본문 저장"
             ):
                 try:
-                    parsed = urlparse(
-                        url
-                    )
+                    parsed = urlparse(url)
 
                     if (
-                        not uploaded
-                        or not title.strip()
+                        not title.strip()
                         or not publisher.strip()
                         or parsed.scheme != "https"
                         or not parsed.hostname
@@ -3067,134 +2918,50 @@ else:
                         or parsed.password
                     ):
                         raise ValueError(
-                            "파일, 제목, 발행사, "
-                            "HTTPS 원문 링크를 확인하세요."
+                            "제목·출처·HTTPS 링크를 확인하세요."
                         )
 
-                    body = pdf_text(
-                        uploaded.getvalue()
+                    text = (
+                        pdf_text(
+                            uploaded.getvalue()
+                        )
+                        if uploaded
+                        else body
                     )
-
-                    date = datetime.combine(
-                        published,
-                        datetime.min.time(),
-                        tzinfo=KST,
-                    ).isoformat()
 
                     store.save_document({
                         "title": title.strip(),
                         "publisher": publisher.strip(),
                         "url": url,
-                        "body": body,
                         "market": market,
-                        "kind": "사용자 등록 보고서",
-                        "published_at": date,
+                        "body": text,
+                        "kind": (
+                            "직접 등록 PDF"
+                            if uploaded
+                            else "직접 등록 기사"
+                        ),
+                        "published_at": datetime.combine(
+                            date,
+                            datetime.min.time(),
+                            tzinfo=KST,
+                        ).isoformat(),
                     })
 
                     st.success(
-                        "실제 본문을 저장했습니다. "
-                        "오늘 화면에서 원문 정리를 눌러주세요."
+                        "본문을 저장했습니다."
                     )
 
                 except Exception as error:
-                    st.error(
-                        f"저장하지 않았습니다: {error}"
-                    )
+                    st.error(str(error))
 
-    with st.expander(
-        "접근이 차단된 기사 본문 직접 등록"
-    ):
-        st.caption(
-            "브라우저에서 정상적으로 읽을 수 있고 "
-            "이용 가능한 실제 본문을 붙여넣으세요."
-        )
-
-        with st.form(
-            "paste_article"
-        ):
-            article_title = st.text_input(
-                "기사 제목"
-            )
-
-            article_url = st.text_input(
-                "원문 HTTPS 링크"
-            )
-
-            article_source = st.text_input(
-                "출처 이름",
-                value="Investing.com",
-            )
-
-            article_day = st.date_input(
-                "기사 발행일",
-                value=datetime.now(KST).date(),
-                max_value=datetime.now(KST).date(),
-            )
-
-            article_market = st.selectbox(
-                "정리 시장",
-                ["해외", "국내", "비트코인"],
-            )
-
-            article_body = st.text_area(
-                "실제 원문 본문",
-                height=220,
-            )
-
-            if st.form_submit_button(
-                "기사 본문 저장"
-            ):
-                try:
-                    parsed = urlparse(
-                        article_url
-                    )
-
-                    if (
-                        not article_title.strip()
-                        or not article_source.strip()
-                        or parsed.scheme != "https"
-                        or not parsed.hostname
-                        or parsed.username
-                        or parsed.password
-                    ):
-                        raise ValueError(
-                            "제목, 출처, HTTPS 원문 링크를 "
-                            "확인하세요."
-                        )
-
-                    date = datetime.combine(
-                        article_day,
-                        datetime.min.time(),
-                        tzinfo=KST,
-                    ).isoformat()
-
-                    store.save_document({
-                        "title": article_title.strip(),
-                        "url": article_url,
-                        "publisher": article_source.strip(),
-                        "market": article_market,
-                        "kind": "사용자 직접 등록 기사",
-                        "body": article_body,
-                        "published_at": date,
-                    })
-
-                    st.success(
-                        "실제 기사 본문을 저장했습니다."
-                    )
-
-                except Exception as error:
-                    st.error(
-                        str(error)
-                    )
-
-    st.info(
-        "전체 종목 토론방 수집과 "
-        "오전 7시 카카오톡 자동 발송은 "
-        "아직 연결되지 않았습니다."
+    st.caption(
+        "OpenAI 키·크레딧 불필요. "
+        "생성형 AI 분석이 아닌 원문 발췌 방식입니다. "
+        "인베스팅 RSS는 최신 목록 누적 방식이며 "
+        "일주일 전체를 소급 확보하지는 못합니다."
     )
 
-
 st.caption(
-    "강삐 · 실제 원문 발췌 · "
-    "투자 추천이 아닙니다."
+    "강삐 · 실제 원문 발췌 · 투자 추천이 아닙니다. "
+    "카카오톡 자동 발송은 미연결입니다."
 )
